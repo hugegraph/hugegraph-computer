@@ -131,14 +131,18 @@ func TestDeploymentTokenNativeAuthenticationAndRotation(t *testing.T) {
 func TestTokenOutputAndInputFailures(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	const secret = "synthetic-sensitive-factor"
-	if err := run([]string{"-factor", secret, "-quiet", "-i"}, &stdout, &stderr); err != nil {
+	factorFile := filepath.Join(t.TempDir(), "factor")
+	if err := os.WriteFile(factorFile, []byte(secret), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-factor-file", factorFile, "-quiet", "-i"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if auth.ToTokenBase58(strings.TrimSpace(stdout.String())) == nil || stderr.Len() != 0 {
 		t.Fatal("quiet output must contain only the native token")
 	}
 	stdout.Reset()
-	if err := run([]string{"-factor", secret}, &stdout, &stderr); err != nil {
+	if err := run([]string{"-factor-file", factorFile}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(stdout.String(), secret) || strings.Contains(stdout.String(), "json:") {
@@ -159,10 +163,12 @@ func TestTokenOutputAndInputFailures(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{
+		{},
 		{"-factor-file", filepath.Join(t.TempDir(), "missing")},
-		{"-factor", secret, "-factor-file", "unused"},
-		{"-user", ""},
-		{"-output-file", filepath.Join(t.TempDir(), "missing", "token")},
+		{"-factor", secret},
+		{"-factor", secret, "-factor-file", factorFile},
+		{"-user", "", "-factor-file", factorFile},
+		{"-factor-file", factorFile, "-output-file", filepath.Join(t.TempDir(), "missing", "token")},
 	} {
 		stdout.Reset()
 		stderr.Reset()
@@ -185,8 +191,12 @@ func TestTokenFileReplacesSymlinkWithoutReadingTarget(t *testing.T) {
 	if err := os.Symlink(target, output); err != nil {
 		t.Fatal(err)
 	}
+	factorFile := filepath.Join(directory, "factor")
+	if err := os.WriteFile(factorFile, []byte("synthetic-output-file-factor"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
-	if err := run([]string{"-output-file", output, "-i"}, &stdout, &stderr); err != nil {
+	if err := run([]string{"-factor-file", factorFile, "-output-file", output, "-i"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(target)

@@ -49,11 +49,15 @@ func (factory *SecureTokenFactory) Sign(token *Token) {
 	if token == nil {
 		return
 	}
+	if len(factory.signingKey) == 0 {
+		token.Digest = ""
+		return
+	}
 	token.Digest = secureTokenPrefix + hex.EncodeToString(factory.signature(token))
 }
 
 func (factory *SecureTokenFactory) Verify(token *Token) bool {
-	if token == nil {
+	if token == nil || len(factory.signingKey) == 0 {
 		return false
 	}
 	encoded, ok := strings.CutPrefix(token.Digest, secureTokenPrefix)

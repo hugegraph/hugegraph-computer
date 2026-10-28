@@ -109,3 +109,16 @@ func TestSecureTokenFactoryRejectsInvalidKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestZeroValueSecureTokenFactoryFailsClosed(t *testing.T) {
+	var factory SecureTokenFactory
+	token := &Token{User: "admin", Space: "$DEFAULT", Client: "zero-value", Time: math.MaxInt64}
+	token.Digest = secureTokenPrefix + strings.Repeat("0", 64)
+	if factory.Verify(token) {
+		t.Fatal("zero-value factory must never authenticate a token")
+	}
+	factory.Sign(token)
+	if token.Digest != "" || factory.Verify(token) {
+		t.Fatal("zero-value signing must clear the signature and remain unusable")
+	}
+}

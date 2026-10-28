@@ -35,7 +35,7 @@ ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /go/bin/app && \
-    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /go/bin/vermeer-token ./tools/token
+    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /go/bin/vermeer-token ./cmd/vermeer-token
 
 FROM alpine
 EXPOSE 8080

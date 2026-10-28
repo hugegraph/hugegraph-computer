@@ -74,7 +74,7 @@ jobs:
 
       - name: Test deployment credentials and graph initialization failures
         run: |
-          go test -race ./apps/auth ./tools/token
+          go test -race ./apps/auth ./cmd/vermeer-token
           go test -race ./apps/common
           go test -race ./apps/master/workers ./apps/master/services -run 'Test(WorkerAvailability|NativeLoginCookie)'
           go test -race ./apps/master/bl -run 'Test(WorkerAvailability|HugegraphLoadAuthorization)'
@@ -133,6 +133,13 @@ jobs:
           test "$(stat -c '%a' "${TOKEN_CHECK_DIR}/token")" = 600
           test ! -s "${TOKEN_CHECK_DIR}/stdout"
           test ! -s "${TOKEN_CHECK_DIR}/stderr"
+          if docker run --rm --entrypoint /go/bin/vermeer-token vermeer:ci-check \
+            -factor synthetic-legacy-factor -quiet \
+            > "${TOKEN_CHECK_DIR}/stdout" 2> "${TOKEN_CHECK_DIR}/stderr"; then
+            echo 'runtime token helper accepted a legacy inline factor' >&2
+            exit 1
+          fi
+          test ! -s "${TOKEN_CHECK_DIR}/stdout"
           if docker run --rm -v "${TOKEN_CHECK_DIR}:/probe" \
             --entrypoint /go/bin/vermeer-token vermeer:ci-check \
             -factor-file /probe/missing -output-file /probe/rejected -quiet \

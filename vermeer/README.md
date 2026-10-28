@@ -266,14 +266,14 @@ it never falls back to an inline or default factor.
 File-backed factors use **v2 HMAC-SHA256** tokens. Their digest carries a `v2:` version marker inside the existing Base58-encoded token;
 the signed payload preserves the boundaries of user, space, nickname, client and timestamp fields.
 Master in file mode accepts only v2 signatures and compares MACs in constant time. It never falls back to legacy SHA1 verification.
-The existing `auth_token_factor` string configuration and `-factor` generator option retain their historical token protocol for older clients.
+The existing `auth_token_factor` string configuration and source-only legacy token tool retain their historical protocol for older clients.
 Those legacy tokens and v2 tokens cannot authenticate across modes.
 
 Images built from this revision include the native `/go/bin/vermeer-token` helper. Generate a protected login/service token file:
 
 ```bash
 # Run with Go
-go run ./tools/token -user admin -space '$DEFAULT' \
+go run ./cmd/vermeer-token -user admin -space '$DEFAULT' \
   -factor-file config/token-factor -output-file config/admin-token -i -quiet
 
 # Or run in Docker (no local Go required)
@@ -285,12 +285,15 @@ docker run --rm -v "$PWD/config:/tokens" --entrypoint /go/bin/vermeer-token \
 Parameters:
 - `-user` — Username (default: `foo`)
 - `-space` — Graph space name (default: `bar`)
-- `-factor-file` — Read the same signing factor file used by Master.
-- `-factor` — Legacy inline factor; mutually exclusive with `-factor-file`. Prefer files for deployment secrets.
+- `-factor-file` — Required. Read the same signing factor file used by Master; inline factors are not accepted.
 - `-output-file` — Atomically write the Base58 token with mode `0600`, with no token or factor printed.
 - `-quiet` — When no output file is set, print only the token for an intentional interactive retrieval.
 - `-client` — Client identifier (default: `hg`)
 - `-i` — Generate immortal token (never expires)
+
+The runtime helper supports only the secure file-backed protocol and rejects `-factor`.
+The source-only `tools/token/token_generator.go` utility retains its original `-factor` interface and diagnostic output for legacy
+inline-configured Masters. It is not distributed in the runtime image and must not be used for file-backed deployments.
 
 Hubble accepts this plain token file through `vermeer.token_file`; it must not include a `Bearer` prefix or JSON.
 Normal tokens expire after 24 hours. Long-lived service tokens must be protected like passwords.
