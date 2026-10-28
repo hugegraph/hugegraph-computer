@@ -34,11 +34,13 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /go/bin/app
+    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /go/bin/app && \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /go/bin/vermeer-token ./cmd/vermeer-token
 
 FROM alpine
 EXPOSE 8080
-COPY --from=builder /go/bin/app /go/bin/app
+COPY --from=builder --chmod=0755 /go/bin/app /go/bin/app
+COPY --from=builder --chmod=0755 /go/bin/vermeer-token /go/bin/vermeer-token
 COPY --from=builder /src/config/ /go/bin/config/
 COPY --from=builder /src/release-docs/ /go/bin/release-docs/
 COPY --from=builder /usr/local/go/lib/time/zoneinfo.zip /

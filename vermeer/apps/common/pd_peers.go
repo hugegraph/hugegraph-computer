@@ -41,7 +41,9 @@ func resolvePDPeers(taskPeers []string) ([]string, error) {
 	configured := deploymentConfig("VERMEER_PD_PEERS", "pd_peers")
 	if configured == "" {
 		if deploymentConfig("VERMEER_PD_PASSWORD_FILE", "pd_password_file") != "" ||
-			deploymentConfig("VERMEER_HUGEGRAPH_CREDENTIALS_FILE", "hugegraph_credentials_file") != "" {
+			deploymentConfig("VERMEER_HUGEGRAPH_CREDENTIALS_FILE", "hugegraph_credentials_file") != "" ||
+			deploymentConfig("VERMEER_HUGEGRAPH_USERNAME", "hugegraph_username") != "" ||
+			deploymentConfig("VERMEER_HUGEGRAPH_PASSWORD_FILE", "hugegraph_password_file") != "" {
 			return nil, errors.New("configure pd_peers when using deployment credentials")
 		}
 		return taskPeers, nil

@@ -74,10 +74,11 @@ jobs:
 
       - name: Test deployment credentials and graph initialization failures
         run: |
+          go test -race ./apps/auth ./cmd/vermeer-token
           go test -race ./apps/common
-          go test -race ./apps/master/workers ./apps/master/services -run 'TestWorkerAvailability'
+          go test -race ./apps/master/workers ./apps/master/services
           go test -race ./apps/master/bl -run 'Test(WorkerAvailability|HugegraphLoadAuthorization)'
-          go test -race ./apps/worker -run 'Test(LoadReceivers|RecvVertex|ComputeDispatchCancellation)'
+          go test -race ./apps/worker
           go test -race ./apps/structure -run 'Test(VertexStore|GraphPropagates|MemoryVertex|HugegraphSchema)'
 
       - name: Build
@@ -116,3 +117,6 @@ jobs:
           docker run --rm --entrypoint test vermeer:ci-check -f /go/bin/release-docs/LICENSE
           docker run --rm --entrypoint test vermeer:ci-check -f /go/bin/release-docs/NOTICE
           docker run --rm --entrypoint test vermeer:ci-check -d /go/bin/release-docs/licenses
+
+      - name: Verify runtime credentials and native UI login
+        run: bash scripts/test-runtime-image.sh vermeer:ci-check

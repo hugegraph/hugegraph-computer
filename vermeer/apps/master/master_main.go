@@ -40,6 +40,9 @@ func Main() {
 	httpPeer := common.GetConfig("http_peer").(string)
 	debugMode := common.GetConfig("debug_mode").(string)
 	authType := common.GetConfigDefault("auth", "none").(string)
+	if err := auth.ValidateAdminPasswordMode(authType); err != nil {
+		logrus.Fatalf("token authentication initialization failed: %s", err)
+	}
 	services.InfoMaster.IpAddr = httpPeer
 	services.InfoMaster.DebugMod = debugMode
 	services.InfoMaster.Version = version.Version
@@ -50,7 +53,9 @@ func Main() {
 	switch authType {
 	case "token":
 		sen.StaticFS("ui", asset.Assets)
-		auth.Init()
+		if err := auth.Init(); err != nil {
+			logrus.Fatalf("token authentication initialization failed: %s", err)
+		}
 		services.SetRouters(sen, auth.TokenFilter)
 		services.SetAdminRouters(sen, auth.TokenFilter, auth.AdminFilter)
 		services.SetUI(sen)
@@ -74,7 +79,9 @@ func Main() {
 	}
 	serverOptions := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(4 * 1024 * 1024 * 1024),
-		grpc.MaxSendMsgSize(4 * 1024 * 1024 * 1024)}
+		grpc.MaxSendMsgSize(4 * 1024 * 1024 * 1024),
+		grpc.StreamInterceptor(validateWorkerStream),
+	}
 
 	// create grpc server
 	grpcServer := grpc.NewServer(serverOptions...)

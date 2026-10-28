@@ -108,12 +108,15 @@ docker pull hugegraph/vermeer:latest
 ```
 
 Create a dedicated config directory (e.g., `~/vermeer-config/`) with `master.ini` and `worker.ini` files (see [Configuration](#configuration) section).
+Create its `token-factor` file using [Generating Auth Token](#generating-auth-token) before starting the authenticated Master.
 
 Run with Docker:
 
 ```bash
 # Master node (with Web UI enabled)
-docker run -v ~/vermeer-config:/go/bin/config hugegraph/vermeer --env=master -auth token -auth_token_factor 1234
+docker run -v ~/vermeer-config:/go/bin/config \
+  -e VERMEER_AUTH_TOKEN_FACTOR_FILE=/go/bin/config/token-factor \
+  hugegraph/vermeer --env=master -auth token
 
 # Worker node
 docker run -v ~/vermeer-config:/go/bin/config hugegraph/vermeer --env=worker
@@ -246,27 +249,91 @@ Deployment credentials require the trusted PD configuration described below.
 
 ### Generating Auth Token
 
-When `auth=token` is enabled, you need to generate a token for login. Use the built-in token generator:
+When `auth=token` is enabled, protect the signing factor in a file instead of placing it in process arguments.
+Create the file before starting Master, and keep it across restarts:
+
+```bash
+umask 077
+openssl rand -hex 32 > config/token-factor
+```
+
+Set `VERMEER_AUTH_TOKEN_FACTOR_FILE=/path/to/token-factor`, or set `auth_token_factor_file` in Master's INI file.
+The environment file takes precedence over the INI file, and either file takes precedence over `auth_token_factor`.
+The file must contain one valid UTF-8 line with at least 16 characters and cannot contain only whitespace.
+Use a randomly generated value; the example above provides 32 random bytes encoded as 64 hexadecimal characters.
+A terminal LF or CRLF is accepted; other spaces are preserved. An invalid configured file stops Master before it opens its listeners;
+it never falls back to an inline or default factor.
+
+File-backed factors use **v2 HMAC-SHA256** tokens. Their digest carries a `v2:` version marker inside the existing Base58-encoded token;
+the signed payload preserves the boundaries of user, space, nickname, client and timestamp fields.
+Master in file mode accepts only v2 signatures and compares MACs in constant time. It never falls back to legacy SHA1 verification.
+The existing `auth_token_factor` string configuration and source-only legacy token tool retain their historical protocol for older clients.
+Those legacy tokens and v2 tokens cannot authenticate across modes.
+
+Images built from this revision include the native `/go/bin/vermeer-token` helper. Generate a protected login/service token file:
 
 ```bash
 # Run with Go
-go run tools/token/token_generator.go -user admin -space default -factor 1234 -i
+go run ./cmd/vermeer-token -user admin -space '$DEFAULT' \
+  -factor-file config/token-factor -output-file config/admin-token -i -quiet
 
 # Or run in Docker (no local Go required)
-docker run --rm -v $(pwd):/src -v $(pwd)/config:/src/config golang:1.23-alpine sh -c "cd /src && go run tools/token/token_generator.go -user admin -space default -factor 1234 -i"
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/config:/tokens" \
+  --entrypoint /go/bin/vermeer-token \
+  hugegraph/vermeer -user admin -space '$DEFAULT' \
+  -factor-file /tokens/token-factor -output-file /tokens/admin-token -i -quiet
 ```
 
 Parameters:
 - `-user` — Username (default: `foo`)
 - `-space` — Graph space name (default: `bar`)
-- `-factor` — Must match `auth_token_factor` in `master.ini`
+- `-factor-file` — Required. Read the same signing factor file used by Master; inline factors are not accepted.
+- `-output-file` — Atomically write the Base58 token with mode `0600`, with no token or factor printed.
+- `-quiet` — When no output file is set, print only the token for an intentional interactive retrieval.
 - `-client` — Client identifier (default: `hg`)
 - `-i` — Generate immortal token (never expires)
+
+The runtime helper supports only the secure file-backed protocol and rejects `-factor`.
+The source-only `tools/token/token_generator.go` utility retains its original `-factor` interface and diagnostic output for legacy
+inline-configured Masters. It is not distributed in the runtime image and must not be used for file-backed deployments.
+
+Hubble accepts this plain token file through `vermeer.token_file`; it must not include a `Bearer` prefix or JSON.
+Normal tokens expire after 24 hours. Long-lived service tokens must be protected like passwords.
+Rotating the signing factor invalidates existing tokens; regenerate dependent service tokens and restart their clients together.
+Token generation reuses Vermeer's native signing and encoding implementation and does not require a running Master or Kubernetes API access.
+When upgrading an earlier file-based deployment to v2, retain its protected factor file but upgrade Master and the token helper together,
+regenerate service token files, and restart dependent clients. Existing native UI cookies contain old signatures and require a new login token.
+Hubble treats tokens as opaque text, so no Hubble API or token-file format change is required.
 
 The generated token can be used in two ways:
 
 1. **HTTP Header**: `Authorization: Bearer <token>`
 2. **Login API**: `POST /api/v1/login` with body `{"token": "<token>"}` (sets cookie)
+
+### Native UI administrator password
+
+For a short administrator login, optionally configure Master with `VERMEER_ADMIN_PASSWORD_FILE=/path/to/admin-password`,
+or `admin_password_file` in its INI file. The environment path takes precedence. This requires `auth=token` and a valid
+file-backed v2 signing factor; legacy inline signing and `auth=none` reject the password configuration before listening.
+An unconfigured password file preserves token-only login.
+
+Provide a protected `0600` password file, preferably a separately generated random 16-character alphanumeric credential.
+Helm deployments generate and retain this credential separately from the internal signing factor and Hubble service token.
+The file must be nonempty UTF-8 on one line, without CR/LF, and cannot contain only whitespace. All other bytes are preserved,
+including leading or trailing spaces. A configured missing, unreadable or invalid file stops Master; it never disables authentication.
+
+Open `/` and paste this credential into **Admin password or token**. No user database or extra account is created:
+successful password login issues an `admin` session in `$DEFAULT`, signed with v2 HMAC-SHA256 and valid for 24 hours.
+Its cookie is HttpOnly and uses Secure for HTTPS, including requests forwarded with `X-Forwarded-Proto: https`.
+The existing login request field remains `token`; it accepts either the short password or a valid opaque token.
+Incorrect credentials return 401 without issuing a cookie. The short password is never accepted as an API Bearer token.
+Hubble continues to use its independently generated long-lived service token without requiring user input.
+
+Password changes take effect after restarting Master. They change subsequent UI logins without rotating the signing factor
+or Hubble token. Already issued UI sessions remain valid for their remaining 24-hour lifetime; rotate the signing factor
+and regenerate dependent tokens when immediate session revocation is required.
+With token authentication, Worker/Master metadata routes also require a valid session or Bearer token;
+health probes, login and static login assets remain public. Explicit `auth=none` retains its existing behavior.
 
 ### Worker Configuration (`worker.ini`)
 
@@ -279,7 +346,7 @@ is sent as the internal `vermeer` credential and is never added to task paramete
 When no file is configured, the legacy credential remains available for older PD
 deployments; it does not authenticate to a modern PD with a different shared secret.
 
-When either deployment credential file is configured, configure both Master and
+When any PD or HugeGraph deployment credentials are configured, configure both Master and
 Worker with `pd_peers=["pd.internal:8686"]`, or set `VERMEER_PD_PEERS` to that JSON
 array (environment takes precedence). These deployment addresses replace task
 PD addresses for load and output discovery. Missing or invalid deployment peers
@@ -316,8 +383,17 @@ direct adapter never forwards the user's login password. Worker Schema discovery
 and reads use these deployment credentials without adding them to persisted task
 parameters. A configured missing, unreadable, empty or invalid file fails the
 load; it never falls back to task credentials. Without a file, the existing
-`load.hugegraph_username` / `load.hugegraph_password` behavior is retained. This
-setting does not configure the separate HugeGraph result writer.
+`load.hugegraph_username` / `load.hugegraph_password` behavior is retained unless
+the following password-file form is configured. These settings do not configure the separate HugeGraph result writer.
+
+To reuse a Kubernetes Secret containing a raw Server password without converting it to JSON, set
+`VERMEER_HUGEGRAPH_USERNAME` and `VERMEER_HUGEGRAPH_PASSWORD_FILE` together, or configure
+`hugegraph_username` and `hugegraph_password_file` in Worker's INI file. Each environment value overrides its corresponding INI value.
+The explicit JSON credentials file above takes precedence over this pair. If either member of the pair is configured, both are required;
+a missing, unreadable or empty password file fails the load without using task credentials.
+Password-file contents are read exactly, including quotes, backslashes, spaces and terminal newlines; mount the original Secret value
+and avoid adding a newline with `echo`. These credentials are only used for Schema discovery/reads through the configured trusted PD peers
+and do not enter persisted task parameters.
 
 ```ini
 [default]
@@ -336,6 +412,10 @@ run_mode = worker
 # Worker group identifier
 worker_group = default
 ```
+
+For advanced connection troubleshooting, `grpc_dial_timeout` or `VERMEER_GRPC_DIAL_TIMEOUT` bounds Worker peer dialing.
+It defaults to `5s` and must be a positive Go duration such as `500ms` or `10s`. An unreachable bootstrap peer fails
+within this budget so the process supervisor or Kubernetes can retry; a healthy HTTP listener alone does not prove Worker availability.
 
 ## Available Algorithms
 
@@ -365,7 +445,8 @@ worker_group = default
 
 Vermeer exposes a REST API on port `6688` (configurable in `master.ini`).
 
-> **Note**: The Web UI (`/ui/*`) is only available when `auth=token` is configured. Set `auth_token_factor` in `master.ini` or pass `-auth token -auth_token_factor <value>` via command line.
+> **Note**: The Web UI at `/` (with static assets under `/ui/*`) is only available when `auth=token` is configured.
+> Configure the signing factor through `VERMEER_AUTH_TOKEN_FACTOR_FILE` for deployments, or `auth_token_factor` for local use.
 
 ### Key Endpoints
 
@@ -378,7 +459,7 @@ Vermeer exposes a REST API on port `6688` (configurable in `master.ini`).
 | `/api/v1/tasks/{task_id}` | GET | Get task status and results |
 | `/api/v1/workers` | GET | List connected workers |
 | `/api/v1/workers/availability` | GET | Read worker readiness for the authenticated space |
-| `/ui/` | GET | Web UI dashboard |
+| `/` | GET | Web UI dashboard |
 
 Worker availability uses the normal space credential and returns only
 `{"available":true|false}` for that authenticated space's allocations or the
@@ -609,7 +690,7 @@ vermeer/tools/protoc/linux64/protoc vermeer/apps/protos/*.proto --go-grpc_out=ve
 
 ## Monitoring
 
-Access the Web UI dashboard at `http://master-ip:6688/ui/master.html` for:
+Access the Web UI dashboard at `http://master-ip:6688/` for:
 
 > **Note**: The Web UI requires `auth=token` in `master.ini` (or `-auth token` via command line). Without token authentication, the UI routes are not registered.
 
@@ -637,6 +718,18 @@ Access the Web UI dashboard at `http://master-ip:6688/ui/master.html` for:
 - Increase `compute_threads` in worker config
 - Check network latency between master and workers
 - Profile algorithm with built-in metrics (access via API)
+
+## Runtime image validation
+
+Validate a built image with Docker and host Python 3 (standard library only), without PD or Store:
+
+```bash
+bash scripts/test-runtime-image.sh hugegraph/vermeer:your-build
+```
+
+The check covers non-root helper execution, private v2 token files, invalid-configuration startup failures,
+short-password UI login, cookie/API authentication and embedded login assets. It binds Master only to local loopback,
+uses temporary test credentials, applies bounded timeouts and removes its containers and files on exit.
 
 ## Links
 

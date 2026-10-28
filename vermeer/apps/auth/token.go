@@ -18,6 +18,7 @@ under the License.
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/hex"
 	"io"
@@ -69,6 +70,10 @@ func (factory *TokenFactory) getRandoms() *[4]string {
 
 // NewToken Create a Token by login-id, space, client(e.g. IP address).
 func (factory *TokenFactory) NewToken(user string, space string, client string) *Token {
+	return newToken(user, space, client)
+}
+
+func newToken(user, space, client string) *Token {
 	if user == "" {
 		return nil
 	}
@@ -92,7 +97,7 @@ func (factory *TokenFactory) Verify(a *Token) bool {
 
 	s := digest(factory.signSource(a))
 
-	return a.Digest == s
+	return hmac.Equal([]byte(a.Digest), []byte(s))
 }
 
 func digest(s string) string {

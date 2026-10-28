@@ -20,7 +20,7 @@
         login: function () {
             const token = $('#admin_token').val();
             if (!token) {
-                showDelModal('empty token');
+                showDelModal('Enter an admin password or token.');
                 return;
             }
 
@@ -29,6 +29,10 @@
                 function (data) {
                     console.log(data.message);
                     location.reload(true);
+                },
+                function (err) {
+                    const message = err.responseJSON && err.responseJSON.message;
+                    showDelModal(message || 'Login failed.');
                 }
             );
         },
@@ -141,22 +145,22 @@
                 }
             },
             error: function (err) {
+                if (error) {
+                    if (caller) {
+                        error.apply(caller, [err]);
+                    } else {
+                        error(err);
+                    }
+                    return;
+                }
                 if (err.status === 401) {
                     showDelModal('Login First!');
                     return;
                 } else {
-                    console.log('ajax request failed:', err);
+                    console.log('ajax request failed:', err.status);
                 }
-                if (!error) {
-                    let data = JSON.parse(err.responseText);
-                    showDelModal(data.message);
-                    return;
-                }
-                if (caller) {
-                    error.apply(caller, [err]);
-                } else {
-                    error(err);
-                }
+                let data = JSON.parse(err.responseText);
+                showDelModal(data.message);
             }
         });
     }

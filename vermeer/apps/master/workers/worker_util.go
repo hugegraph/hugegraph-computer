@@ -82,7 +82,11 @@ func toMemoryLimitReq(limit *WorkerMemLimit) *pb.SetMemoryLimitReq {
 
 }
 
-func doSendMemoryLimitReq(worker *WorkerClient, req *pb.SetMemoryLimitReq) (resp *pb.SetMemoryLimitResp, err error) {
+func doSendMemoryLimitReq(worker *WorkerClient, req *pb.SetMemoryLimitReq) (*pb.SetMemoryLimitResp, error) {
+	return doSendMemoryLimitReqContext(context.Background(), worker, req)
+}
+
+func doSendMemoryLimitReqContext(ctx context.Context, worker *WorkerClient, req *pb.SetMemoryLimitReq) (resp *pb.SetMemoryLimitResp, err error) {
 	if worker == nil || req == nil {
 		return nil, nil
 	}
@@ -98,7 +102,7 @@ func doSendMemoryLimitReq(worker *WorkerClient, req *pb.SetMemoryLimitReq) (resp
 	}
 
 	var response *pb.RuntimeActionResp
-	if response, err = worker.Session.RuntimeAction(context.Background(), request); err != nil {
+	if response, err = worker.Session.RuntimeAction(ctx, request); err != nil {
 		return nil, err
 	}
 

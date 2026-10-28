@@ -46,6 +46,7 @@ func (s *ServerManager) StartingLoadServer(workerName string, stream pb.Master_L
 	s.locker.Lock()
 	s.loadSevers[workerName] = loadServer
 	worker := workerMgr.GetWorker(workerName)
+	loadServer.worker = worker
 	workerMgr.SetTaskStream(worker, workers.LoadTaskStream, stream.Context())
 	s.locker.Unlock()
 	defer func() {
@@ -70,6 +71,7 @@ func (s *ServerManager) StartingComputeServer(workerName string, stream pb.Maste
 	s.locker.Lock()
 	s.computeSevers[workerName] = computeServer
 	worker := workerMgr.GetWorker(workerName)
+	computeServer.worker = worker
 	workerMgr.SetTaskStream(worker, workers.ComputeTaskStream, stream.Context())
 	s.locker.Unlock()
 	defer func() {

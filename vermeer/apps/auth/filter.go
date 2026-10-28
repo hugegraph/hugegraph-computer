@@ -19,7 +19,9 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"vermeer/apps/common"
@@ -38,10 +40,48 @@ const (
 )
 
 var factory *TokenFactory
+var secureFactory *SecureTokenFactory
 
-func Init() {
-	factor := common.GetConfig("auth_token_factor").(string)
+func Init() error {
+	factory = nil
+	secureFactory = nil
+	adminPassword = nil
+	passwordFile := adminPasswordFile()
+	file := os.Getenv("VERMEER_AUTH_TOKEN_FACTOR_FILE")
+	if file == "" {
+		file, _ = common.GetConfigDefault("auth_token_factor_file", "").(string)
+	}
+	if file != "" {
+		signingKey, err := ReadTokenFactorFile(file)
+		if err != nil {
+			factory = nil
+			return err
+		}
+		configuredFactory, err := NewSecureTokenFactory(signingKey)
+		if err != nil {
+			return err
+		}
+		var configuredPassword []byte
+		if passwordFile != "" {
+			configuredPassword, err = readAdminPasswordFile(passwordFile)
+			if err != nil {
+				return err
+			}
+		}
+		secureFactory = configuredFactory
+		adminPassword = configuredPassword
+		return nil
+	}
+	if passwordFile != "" {
+		return errors.New("admin password file requires file-backed v2 token authentication")
+	}
+	factor, inlineConfigured := common.GetConfig("auth_token_factor").(string)
+	if !inlineConfigured {
+		factory = nil
+		return errors.New("configure a token signing factor or factor file")
+	}
 	factory = &TokenFactory{Factor: factor}
+	return nil
 }
 
 func NoneAuthFilter(ctx *gin.Context) {
@@ -77,12 +117,12 @@ func TokenFilter(ctx *gin.Context) {
 		goto LOGIN
 	}
 
-	if !factory.Verify(token) {
+	if !validSignature(token) {
 		text = "Invalid Token"
 		goto LOGIN
 	}
 
-	if time.Now().Unix()-token.Time > tokenMaxAge {
+	if tokenExpired(token) {
 		text = "Expired Token"
 		goto LOGIN
 	}
@@ -181,4 +221,8 @@ func DecodeBase58(str string) string {
 	res := string(b)
 	return res
 
+}
+
+func tokenExpired(token *Token) bool {
+	return time.Now().Unix()-token.Time > tokenMaxAge
 }

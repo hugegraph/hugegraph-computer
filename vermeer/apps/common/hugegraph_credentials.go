@@ -29,7 +29,23 @@ import (
 func ResolveHugegraphCredentials(username, password string) (string, string, error) {
 	file := deploymentConfig("VERMEER_HUGEGRAPH_CREDENTIALS_FILE", "hugegraph_credentials_file")
 	if file == "" {
-		return username, password, nil
+		deploymentUsername := deploymentConfig("VERMEER_HUGEGRAPH_USERNAME", "hugegraph_username")
+		passwordFile := deploymentConfig("VERMEER_HUGEGRAPH_PASSWORD_FILE", "hugegraph_password_file")
+		if deploymentUsername == "" && passwordFile == "" {
+			return username, password, nil
+		}
+		if deploymentUsername == "" || passwordFile == "" {
+			return "", "", errors.New("configure both HugeGraph username and password file")
+		}
+		data, err := os.ReadFile(passwordFile)
+		if err != nil {
+			return "", "", fmt.Errorf("read HugeGraph password file: %w", err)
+		}
+		if len(data) == 0 {
+			return "", "", errors.New("HugeGraph password file must not be empty")
+		}
+		// Password files are raw Secret values: preserve spaces, quotes and newlines.
+		return deploymentUsername, string(data), nil
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
