@@ -18,8 +18,11 @@ under the License.
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"strconv"
 	"strings"
@@ -28,7 +31,10 @@ import (
 
 var empty = ""
 
-const defaultFactor = "!^_^!YouCanTypeWhateverYouWant"
+const (
+	defaultFactor     = "!^_^!YouCanTypeWhateverYouWant"
+	secureTokenPrefix = "v2:"
+)
 
 type Token struct {
 	User   string `json:"u"` // Login ID
@@ -42,6 +48,16 @@ type Token struct {
 type TokenFactory struct {
 	Factor  string
 	randoms *[4]string
+	// File-backed deployment keys never populate the legacy Factor field.
+	signingKey []byte
+}
+
+// NewSecureTokenFactory uses versioned HMAC-SHA256 tokens without legacy fallback.
+func NewSecureTokenFactory(signingKey string) (*TokenFactory, error) {
+	if err := validateTokenSigningKey(signingKey); err != nil {
+		return nil, err
+	}
+	return &TokenFactory{signingKey: []byte(signingKey)}, nil
 }
 
 func (factory *TokenFactory) getRandoms() *[4]string {
@@ -82,6 +98,10 @@ func (factory *TokenFactory) Sign(a *Token) {
 	if a == nil {
 		return
 	}
+	if factory.signingKey != nil {
+		a.Digest = secureTokenPrefix + hex.EncodeToString(factory.secureSignature(a))
+		return
+	}
 	a.Digest = digest(factory.signSource(a))
 }
 
@@ -90,9 +110,27 @@ func (factory *TokenFactory) Verify(a *Token) bool {
 		return false
 	}
 
+	if factory.signingKey != nil {
+		encoded, ok := strings.CutPrefix(a.Digest, secureTokenPrefix)
+		if !ok || len(encoded) != sha256.Size*2 {
+			return false
+		}
+		signature, err := hex.DecodeString(encoded)
+		return err == nil && hmac.Equal(signature, factory.secureSignature(a))
+	}
 	s := digest(factory.signSource(a))
 
-	return a.Digest == s
+	return hmac.Equal([]byte(a.Digest), []byte(s))
+}
+
+func (factory *TokenFactory) secureSignature(token *Token) []byte {
+	// Fixed-field JSON preserves field boundaries and excludes the digest.
+	// Authenticate the nickname as well as every authorization field.
+	payload, _ := json.Marshal([5]interface{}{token.User, token.Space, token.Nick, token.Client, token.Time})
+	mac := hmac.New(sha256.New, factory.signingKey)
+	_, _ = mac.Write([]byte("vermeer-token-v2\x00"))
+	_, _ = mac.Write(payload)
+	return mac.Sum(nil)
 }
 
 func digest(s string) string {

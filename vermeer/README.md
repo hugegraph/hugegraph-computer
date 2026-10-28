@@ -263,6 +263,12 @@ The file must contain one valid UTF-8 line with at least four characters and can
 A terminal LF or CRLF is accepted; other spaces are preserved. An invalid configured file stops Master before it opens its listeners;
 it never falls back to an inline or default factor.
 
+File-backed factors use **v2 HMAC-SHA256** tokens. Their digest carries a `v2:` version marker inside the existing Base58-encoded token;
+the signed payload preserves the boundaries of user, space, nickname, client and timestamp fields.
+Master in file mode accepts only v2 signatures and compares MACs in constant time. It never falls back to legacy SHA1 verification.
+The existing `auth_token_factor` string configuration and `-factor` generator option retain their historical token protocol for older clients.
+Those legacy tokens and v2 tokens cannot authenticate across modes.
+
 Images built from this revision include the native `/go/bin/vermeer-token` helper. Generate a protected login/service token file:
 
 ```bash
@@ -290,6 +296,9 @@ Hubble accepts this plain token file through `vermeer.token_file`; it must not i
 Normal tokens expire after 24 hours. Long-lived service tokens must be protected like passwords.
 Rotating the signing factor invalidates existing tokens; regenerate dependent service tokens and restart their clients together.
 Token generation reuses Vermeer's native signing and encoding implementation and does not require a running Master or Kubernetes API access.
+When upgrading an earlier file-based deployment to v2, retain its protected factor file but upgrade Master and the token helper together,
+regenerate service token files, and restart dependent clients. Existing native UI cookies contain old signatures and require a new login token.
+Hubble treats tokens as opaque text, so no Hubble API or token-file format change is required.
 
 The generated token can be used in two ways:
 

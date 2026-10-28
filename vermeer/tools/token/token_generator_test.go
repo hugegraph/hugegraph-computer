@@ -63,8 +63,12 @@ func TestDeploymentTokenNativeAuthenticationAndRotation(t *testing.T) {
 	}
 	token := strings.TrimSpace(string(data))
 	parsed := auth.ToTokenBase58(token)
-	factory := auth.TokenFactory{Factor: firstFactor}
-	if parsed == nil || parsed.Time != math.MaxInt64 || !factory.Verify(parsed) {
+	factory, err := auth.NewSecureTokenFactory(firstFactor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed == nil || parsed.Time != math.MaxInt64 ||
+		!strings.HasPrefix(parsed.Digest, "v2:") || !factory.Verify(parsed) {
 		t.Fatal("helper token must use the native factory and immortal timestamp")
 	}
 	old := common.GetConfigDefault("auth_token_factor", "")
@@ -92,6 +96,14 @@ func TestDeploymentTokenNativeAuthenticationAndRotation(t *testing.T) {
 		}
 	}
 	check(token, http.StatusOK)
+	legacyFactory := auth.TokenFactory{Factor: firstFactor}
+	legacyToken := *parsed
+	legacyFactory.Sign(&legacyToken)
+	legacyData, err := json.Marshal(legacyToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(auth.ToBase58(string(legacyData)), http.StatusUnauthorized)
 	parsed.Time = time.Now().Unix() - 25*60*60
 	factory.Sign(parsed)
 	expired, err := json.Marshal(parsed)

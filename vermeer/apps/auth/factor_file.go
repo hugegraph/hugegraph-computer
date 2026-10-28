@@ -33,9 +33,16 @@ func ReadTokenFactorFile(file string) (string, error) {
 		return "", fmt.Errorf("read token factor file: %w", err)
 	}
 	factor := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
-	if !utf8.ValidString(factor) || utf8.RuneCountInString(factor) < 4 ||
-		strings.TrimSpace(factor) == "" || strings.ContainsAny(factor, "\r\n") {
-		return "", errors.New("token factor file must contain one UTF-8 line of at least four characters")
+	if err := validateTokenSigningKey(factor); err != nil {
+		return "", err
 	}
 	return factor, nil
+}
+
+func validateTokenSigningKey(factor string) error {
+	if !utf8.ValidString(factor) || utf8.RuneCountInString(factor) < 4 ||
+		strings.TrimSpace(factor) == "" || strings.ContainsAny(factor, "\r\n") {
+		return errors.New("token signing key must contain one UTF-8 line of at least four characters")
+	}
+	return nil
 }

@@ -59,20 +59,25 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if *user == "" {
 		return errors.New("user must not be empty")
 	}
+	var factory *auth.TokenFactory
 	if *factorFile != "" {
 		factorSpecified := false
 		flags.Visit(func(f *flag.Flag) { factorSpecified = factorSpecified || f.Name == "factor" })
 		if factorSpecified {
 			return errors.New("use either -factor or -factor-file")
 		}
-		var err error
-		*factor, err = auth.ReadTokenFactorFile(*factorFile)
+		signingKey, err := auth.ReadTokenFactorFile(*factorFile)
 		if err != nil {
 			return err
 		}
+		factory, err = auth.NewSecureTokenFactory(signingKey)
+		if err != nil {
+			return err
+		}
+	} else {
+		factory = &auth.TokenFactory{Factor: *factor}
 	}
 
-	factory := &auth.TokenFactory{Factor: *factor}
 	tokenObj := factory.NewToken(*user, *space, *client)
 	if *immortal {
 		tokenObj.Time = math.MaxInt64

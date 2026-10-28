@@ -45,11 +45,11 @@ func TestTokenFactorFilePrecedenceAndFailClosed(t *testing.T) {
 	}
 	common.SetConfig("auth_token_factor_file", configured)
 	t.Setenv("VERMEER_AUTH_TOKEN_FACTOR_FILE", override)
-	if err := Init(); err != nil || factory.Factor != "environment-factor" {
+	if err := Init(); err != nil || factory.Factor != "" || string(factory.signingKey) != "environment-factor" {
 		t.Fatal("environment factor file must override config and inline factor")
 	}
 	t.Setenv("VERMEER_AUTH_TOKEN_FACTOR_FILE", "")
-	if err := Init(); err != nil || factory.Factor != "configured-factor" {
+	if err := Init(); err != nil || factory.Factor != "" || string(factory.signingKey) != "configured-factor" {
 		t.Fatal("configured factor file must override inline factor")
 	}
 	for _, test := range []struct{ name, data string }{

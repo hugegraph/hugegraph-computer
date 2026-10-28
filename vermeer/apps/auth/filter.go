@@ -42,19 +42,21 @@ const (
 var factory *TokenFactory
 
 func Init() error {
-	factor, inlineConfigured := common.GetConfig("auth_token_factor").(string)
 	file := os.Getenv("VERMEER_AUTH_TOKEN_FACTOR_FILE")
 	if file == "" {
 		file, _ = common.GetConfigDefault("auth_token_factor_file", "").(string)
 	}
 	if file != "" {
-		var err error
-		factor, err = ReadTokenFactorFile(file)
+		signingKey, err := ReadTokenFactorFile(file)
 		if err != nil {
 			factory = nil
 			return err
 		}
-	} else if !inlineConfigured {
+		factory, err = NewSecureTokenFactory(signingKey)
+		return err
+	}
+	factor, inlineConfigured := common.GetConfig("auth_token_factor").(string)
+	if !inlineConfigured {
 		factory = nil
 		return errors.New("configure a token signing factor or factor file")
 	}
