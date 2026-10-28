@@ -67,36 +67,49 @@ func (ph *PeerHandler) SayHelloPeer(ctx context.Context, req *pb.HelloPeerReq) (
 	return &pb.HelloPeerResp{}, nil
 }
 
+func incomingPeer(ctx context.Context) (string, *PeerClient, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	names := md.Get("worker_name")
+	if len(names) != 1 || names[0] == "" {
+		return "", nil, status.Error(codes.InvalidArgument, "worker_name metadata is required")
+	}
+	peer := PeerMgr.GetPeer(names[0])
+	if peer == nil {
+		return "", nil, status.Error(codes.FailedPrecondition, "peer must register before opening streams")
+	}
+	return names[0], peer, nil
+}
+
 func (ph *PeerHandler) Scatter(stream pb.Worker_ScatterServer) error {
-	md, _ := metadata.FromIncomingContext(stream.Context())
-	name := md.Get("worker_name")[0]
-	PeerMgr.GetPeer(name).ScatterHandler.SetServer(stream)
-	PeerMgr.GetPeer(name).ScatterHandler.RecvHandler(name)
-	return nil
+	name, peer, err := incomingPeer(stream.Context())
+	if err != nil {
+		return err
+	}
+	return peer.ScatterHandler.receiveServer(name, stream)
 }
 
 func (ph *PeerHandler) LoadAction(stream pb.Worker_LoadActionServer) error {
-	md, _ := metadata.FromIncomingContext(stream.Context())
-	name := md.Get("worker_name")[0]
-	PeerMgr.GetPeer(name).LoadActionHandler.SetServer(stream)
-	PeerMgr.GetPeer(name).LoadActionHandler.RecvHandler(name)
-	return nil
+	name, peer, err := incomingPeer(stream.Context())
+	if err != nil {
+		return err
+	}
+	return peer.LoadActionHandler.receiveServer(name, stream)
 }
 
 func (ph *PeerHandler) StepEnd(stream pb.Worker_StepEndServer) error {
-	md, _ := metadata.FromIncomingContext(stream.Context())
-	name := md.Get("worker_name")[0]
-	PeerMgr.GetPeer(name).StepEndHandler.SetServer(stream)
-	PeerMgr.GetPeer(name).StepEndHandler.RecvHandler(name)
-	return nil
+	name, peer, err := incomingPeer(stream.Context())
+	if err != nil {
+		return err
+	}
+	return peer.StepEndHandler.receiveServer(name, stream)
 }
 
 func (ph *PeerHandler) SettingAction(stream pb.Worker_SettingActionServer) error {
-	md, _ := metadata.FromIncomingContext(stream.Context())
-	name := md.Get("worker_name")[0]
-	PeerMgr.GetPeer(name).SettingActionHandler.SetServer(stream)
-	PeerMgr.GetPeer(name).SettingActionHandler.RecvHandler(name)
-	return nil
+	name, peer, err := incomingPeer(stream.Context())
+	if err != nil {
+		return err
+	}
+	return peer.SettingActionHandler.receiveServer(name, stream)
 }
 
 func (ph *PeerHandler) DeleteGraph(ctx context.Context, req *pb.DeleteGraphReq) (*pb.DeleteGraphResp, error) {
@@ -404,36 +417,67 @@ const (
 
 type LoadActionHandler struct {
 	mode       byte
+	peer       *PeerClient
+	generation uint64
 	grpcServer pb.Worker_LoadActionServer
 	grpcClient pb.Worker_LoadActionClient
 	locker     sync.Mutex
 }
 
-func (dh *LoadActionHandler) SetServer(stream pb.Worker_LoadActionServer) {
-	dh.mode = HandlerModeServer
-	dh.grpcServer = stream
+func (dh *LoadActionHandler) SetServer(stream pb.Worker_LoadActionServer) uint64 {
+	return dh.setServer(stream, nil)
 }
-
-func (dh *LoadActionHandler) SetClient(client pb.Worker_LoadActionClient) {
-	dh.mode = HandlerModeClient
-	dh.grpcClient = client
+func (dh *LoadActionHandler) setServer(stream pb.Worker_LoadActionServer, cancel context.CancelFunc) uint64 {
+	dh.locker.Lock()
+	defer dh.locker.Unlock()
+	dh.generation = PeerMgr.bindPeerStream(dh.peer, peerLoadStream, cancel)
+	dh.mode, dh.grpcServer, dh.grpcClient = HandlerModeServer, stream, nil
+	return dh.generation
 }
-
+func (dh *LoadActionHandler) SetClient(stream pb.Worker_LoadActionClient) uint64 {
+	dh.locker.Lock()
+	defer dh.locker.Unlock()
+	dh.generation = PeerMgr.bindPeerStream(dh.peer, peerLoadStream, nil)
+	dh.mode, dh.grpcClient, dh.grpcServer = HandlerModeClient, stream, nil
+	return dh.generation
+}
+func (dh *LoadActionHandler) IsClient() bool {
+	dh.locker.Lock()
+	defer dh.locker.Unlock()
+	return dh.mode == HandlerModeClient
+}
+func (dh *LoadActionHandler) receiveServer(name string, stream pb.Worker_LoadActionServer) error {
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	generation := dh.setServer(stream, cancel)
+	if generation == 0 {
+		return status.Error(codes.FailedPrecondition, "peer registration was replaced")
+	}
+	done := make(chan struct{})
+	go func() { dh.recv(name, dh.peer, generation, HandlerModeServer, stream, nil); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	return nil
+}
 func (dh *LoadActionHandler) RecvHandler(name string) {
+	dh.locker.Lock()
+	owner, generation, mode, server, client := dh.peer, dh.generation, dh.mode, dh.grpcServer, dh.grpcClient
+	dh.locker.Unlock()
+	dh.recv(name, owner, generation, mode, server, client)
+}
+
+func (dh *LoadActionHandler) recv(name string, owner *PeerClient, generation uint64, mode byte, server pb.Worker_LoadActionServer, client pb.Worker_LoadActionClient) {
 	logrus.Infof("load action recv handler setup: %s", name)
-	dh.locker = sync.Mutex{}
 	loadBl := LoadGraphBl{}
-	if dh.mode == HandlerModeServer {
+	if mode == HandlerModeServer {
 		for {
-			resp, err := dh.grpcServer.Recv()
+			resp, err := server.Recv()
 			if err != nil {
 				logrus.Errorf("recv load action error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerLoadStream, generation)
+				return
 			}
 			//logrus.Infof("LoadActionHandler server recv action: %v, end: %v", resp.Action, resp.End)
 			if resp.Action == pb.LoadAction_LoadVertex {
@@ -467,17 +511,13 @@ func (dh *LoadActionHandler) RecvHandler(name string) {
 					resp.Data)
 			}
 		}
-	} else if dh.mode == HandlerModeClient {
+	} else if mode == HandlerModeClient {
 		for {
-			resp, err := dh.grpcClient.Recv()
+			resp, err := client.Recv()
 			if err != nil {
 				logrus.Errorf("recv load action error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerLoadStream, generation)
+				return
 			}
 			//logrus.Infof("LoadActionHandler client recv action: %v, end: %v", resp.Action, resp.End)
 			if resp.Action == pb.LoadAction_LoadVertex {
@@ -552,50 +592,77 @@ func (dh *LoadActionHandler) LoadAction(taskId int32, action pb.LoadAction, coun
 
 type ScatterHandler struct {
 	mode       byte
+	peer       *PeerClient
+	generation uint64
 	grpcServer pb.Worker_ScatterServer
 	grpcClient pb.Worker_ScatterClient
 	locker     sync.Mutex
 }
 
-func (sh *ScatterHandler) SetServer(stream pb.Worker_ScatterServer) {
-	sh.mode = HandlerModeServer
-	sh.grpcServer = stream
+func (sh *ScatterHandler) SetServer(stream pb.Worker_ScatterServer) uint64 {
+	return sh.setServer(stream, nil)
 }
-
-func (sh *ScatterHandler) SetClient(client pb.Worker_ScatterClient) {
-	sh.mode = HandlerModeClient
-	sh.grpcClient = client
+func (sh *ScatterHandler) setServer(stream pb.Worker_ScatterServer, cancel context.CancelFunc) uint64 {
+	sh.locker.Lock()
+	defer sh.locker.Unlock()
+	sh.generation = PeerMgr.bindPeerStream(sh.peer, peerScatterStream, cancel)
+	sh.mode, sh.grpcServer, sh.grpcClient = HandlerModeServer, stream, nil
+	return sh.generation
 }
-
+func (sh *ScatterHandler) SetClient(stream pb.Worker_ScatterClient) uint64 {
+	sh.locker.Lock()
+	defer sh.locker.Unlock()
+	sh.generation = PeerMgr.bindPeerStream(sh.peer, peerScatterStream, nil)
+	sh.mode, sh.grpcClient, sh.grpcServer = HandlerModeClient, stream, nil
+	return sh.generation
+}
+func (sh *ScatterHandler) IsClient() bool {
+	sh.locker.Lock()
+	defer sh.locker.Unlock()
+	return sh.mode == HandlerModeClient
+}
+func (sh *ScatterHandler) receiveServer(name string, stream pb.Worker_ScatterServer) error {
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	generation := sh.setServer(stream, cancel)
+	if generation == 0 {
+		return status.Error(codes.FailedPrecondition, "peer registration was replaced")
+	}
+	done := make(chan struct{})
+	go func() { sh.recv(name, sh.peer, generation, HandlerModeServer, stream, nil); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	return nil
+}
 func (sh *ScatterHandler) RecvHandler(name string) {
+	sh.locker.Lock()
+	owner, generation, mode, server, client := sh.peer, sh.generation, sh.mode, sh.grpcServer, sh.grpcClient
+	sh.locker.Unlock()
+	sh.recv(name, owner, generation, mode, server, client)
+}
+
+func (sh *ScatterHandler) recv(name string, owner *PeerClient, generation uint64, mode byte, server pb.Worker_ScatterServer, client pb.Worker_ScatterClient) {
 	logrus.Infof("scatter recv handler setup: %s", name)
-	sh.locker = sync.Mutex{}
-	if sh.mode == HandlerModeServer {
+	if mode == HandlerModeServer {
 		for {
-			resp, err := sh.grpcServer.Recv()
+			resp, err := server.Recv()
 			if err != nil {
 				logrus.Errorf("recv scatter error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerScatterStream, generation)
+				return
 			}
 			cb := ComputeBl{}
 			go cb.RecvScatter(resp.TaskId, resp.Data, resp.End, resp.SIdx)
 		}
-	} else if sh.mode == HandlerModeClient {
+	} else if mode == HandlerModeClient {
 		for {
-			resp, err := sh.grpcClient.Recv()
+			resp, err := client.Recv()
 			if err != nil {
 				logrus.Errorf("recv scatter error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerScatterStream, generation)
+				return
 			}
 			cb := ComputeBl{}
 			go cb.RecvScatter(resp.TaskId, resp.Data, resp.End, resp.SIdx)
@@ -639,50 +706,77 @@ func (sh *ScatterHandler) SendScatter(taskId int32, step int32, count int32, end
 
 type StepEndHandler struct {
 	mode       byte
+	peer       *PeerClient
+	generation uint64
 	grpcServer pb.Worker_StepEndServer
 	grpcClient pb.Worker_StepEndClient
 	locker     sync.Mutex
 }
 
-func (sh *StepEndHandler) SetServer(stream pb.Worker_StepEndServer) {
-	sh.mode = HandlerModeServer
-	sh.grpcServer = stream
+func (sh *StepEndHandler) SetServer(stream pb.Worker_StepEndServer) uint64 {
+	return sh.setServer(stream, nil)
 }
-
-func (sh *StepEndHandler) SetClient(client pb.Worker_StepEndClient) {
-	sh.mode = HandlerModeClient
-	sh.grpcClient = client
+func (sh *StepEndHandler) setServer(stream pb.Worker_StepEndServer, cancel context.CancelFunc) uint64 {
+	sh.locker.Lock()
+	defer sh.locker.Unlock()
+	sh.generation = PeerMgr.bindPeerStream(sh.peer, peerStepStream, cancel)
+	sh.mode, sh.grpcServer, sh.grpcClient = HandlerModeServer, stream, nil
+	return sh.generation
 }
-
+func (sh *StepEndHandler) SetClient(stream pb.Worker_StepEndClient) uint64 {
+	sh.locker.Lock()
+	defer sh.locker.Unlock()
+	sh.generation = PeerMgr.bindPeerStream(sh.peer, peerStepStream, nil)
+	sh.mode, sh.grpcClient, sh.grpcServer = HandlerModeClient, stream, nil
+	return sh.generation
+}
+func (sh *StepEndHandler) IsClient() bool {
+	sh.locker.Lock()
+	defer sh.locker.Unlock()
+	return sh.mode == HandlerModeClient
+}
+func (sh *StepEndHandler) receiveServer(name string, stream pb.Worker_StepEndServer) error {
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	generation := sh.setServer(stream, cancel)
+	if generation == 0 {
+		return status.Error(codes.FailedPrecondition, "peer registration was replaced")
+	}
+	done := make(chan struct{})
+	go func() { sh.recv(name, sh.peer, generation, HandlerModeServer, stream, nil); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	return nil
+}
 func (sh *StepEndHandler) RecvHandler(name string) {
+	sh.locker.Lock()
+	owner, generation, mode, server, client := sh.peer, sh.generation, sh.mode, sh.grpcServer, sh.grpcClient
+	sh.locker.Unlock()
+	sh.recv(name, owner, generation, mode, server, client)
+}
+
+func (sh *StepEndHandler) recv(name string, owner *PeerClient, generation uint64, mode byte, server pb.Worker_StepEndServer, client pb.Worker_StepEndClient) {
 	logrus.Infof("step end recv handler setup: %s", name)
-	sh.locker = sync.Mutex{}
-	if sh.mode == HandlerModeServer {
+	if mode == HandlerModeServer {
 		for {
-			resp, err := sh.grpcServer.Recv()
+			resp, err := server.Recv()
 			if err != nil {
 				logrus.Errorf("recv step end error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerStepStream, generation)
+				return
 			}
 			cb := ComputeBl{}
 			go cb.StepEnd(resp.TaskId, resp.WorkerName)
 		}
-	} else if sh.mode == HandlerModeClient {
+	} else if mode == HandlerModeClient {
 		for {
-			resp, err := sh.grpcClient.Recv()
+			resp, err := client.Recv()
 			if err != nil {
 				logrus.Errorf("recv step end error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerStepStream, generation)
+				return
 			}
 			cb := ComputeBl{}
 			go cb.StepEnd(resp.TaskId, resp.WorkerName)
@@ -716,36 +810,67 @@ func (sh *StepEndHandler) SendStepEnd(taskId int32) {
 
 type SettingActionHandler struct {
 	mode       byte
+	peer       *PeerClient
+	generation uint64
 	grpcServer pb.Worker_SettingActionServer
 	grpcClient pb.Worker_SettingActionClient
 	locker     sync.Mutex
 }
 
-func (dh *SettingActionHandler) SetServer(stream pb.Worker_SettingActionServer) {
-	dh.mode = HandlerModeServer
-	dh.grpcServer = stream
+func (dh *SettingActionHandler) SetServer(stream pb.Worker_SettingActionServer) uint64 {
+	return dh.setServer(stream, nil)
 }
-
-func (dh *SettingActionHandler) SetClient(client pb.Worker_SettingActionClient) {
-	dh.mode = HandlerModeClient
-	dh.grpcClient = client
+func (dh *SettingActionHandler) setServer(stream pb.Worker_SettingActionServer, cancel context.CancelFunc) uint64 {
+	dh.locker.Lock()
+	defer dh.locker.Unlock()
+	dh.generation = PeerMgr.bindPeerStream(dh.peer, peerSettingStream, cancel)
+	dh.mode, dh.grpcServer, dh.grpcClient = HandlerModeServer, stream, nil
+	return dh.generation
 }
-
+func (dh *SettingActionHandler) SetClient(stream pb.Worker_SettingActionClient) uint64 {
+	dh.locker.Lock()
+	defer dh.locker.Unlock()
+	dh.generation = PeerMgr.bindPeerStream(dh.peer, peerSettingStream, nil)
+	dh.mode, dh.grpcClient, dh.grpcServer = HandlerModeClient, stream, nil
+	return dh.generation
+}
+func (dh *SettingActionHandler) IsClient() bool {
+	dh.locker.Lock()
+	defer dh.locker.Unlock()
+	return dh.mode == HandlerModeClient
+}
+func (dh *SettingActionHandler) receiveServer(name string, stream pb.Worker_SettingActionServer) error {
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	generation := dh.setServer(stream, cancel)
+	if generation == 0 {
+		return status.Error(codes.FailedPrecondition, "peer registration was replaced")
+	}
+	done := make(chan struct{})
+	go func() { dh.recv(name, dh.peer, generation, HandlerModeServer, stream, nil); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	return nil
+}
 func (dh *SettingActionHandler) RecvHandler(name string) {
+	dh.locker.Lock()
+	owner, generation, mode, server, client := dh.peer, dh.generation, dh.mode, dh.grpcServer, dh.grpcClient
+	dh.locker.Unlock()
+	dh.recv(name, owner, generation, mode, server, client)
+}
+
+func (dh *SettingActionHandler) recv(name string, owner *PeerClient, generation uint64, mode byte, server pb.Worker_SettingActionServer, client pb.Worker_SettingActionClient) {
 	logrus.Infof("load action recv handler setup: %s", name)
-	dh.locker = sync.Mutex{}
 	settingBl := SettingBl{}
-	if dh.mode == HandlerModeServer {
+	if mode == HandlerModeServer {
 		for {
-			resp, err := dh.grpcServer.Recv()
+			resp, err := server.Recv()
 			if err != nil {
 				logrus.Errorf("recv setting action error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerSettingStream, generation)
+				return
 			}
 			//logrus.Infof("LoadActionHandler server recv action: %v, end: %v", resp.Action, resp.End)
 			if resp.Action == pb.SettingAction_SetOutEdges {
@@ -764,17 +889,13 @@ func (dh *SettingActionHandler) RecvHandler(name string) {
 					resp.Data)
 			}
 		}
-	} else if dh.mode == HandlerModeClient {
+	} else if mode == HandlerModeClient {
 		for {
-			resp, err := dh.grpcClient.Recv()
+			resp, err := client.Recv()
 			if err != nil {
 				logrus.Errorf("recv setting action error: %s", err)
-				time.Sleep(2 * time.Second)
-				if !PeerMgr.CheckPeerAlive(name) {
-					PeerMgr.RemovePeer(name)
-					break
-				}
-				continue
+				PeerMgr.RemovePeerStream(owner, peerSettingStream, generation)
+				return
 			}
 			//logrus.Infof("LoadActionHandler client recv action: %v, end: %v", resp.Action, resp.End)
 			if resp.Action == pb.SettingAction_SetOutEdges {

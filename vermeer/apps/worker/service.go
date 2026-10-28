@@ -117,14 +117,15 @@ func (s *Service) Init() (err error) {
 		return fmt.Errorf("open registration lifeline: %w", err)
 	}
 	for _, w := range resp.GetWorkers() {
-		PeerMgr.AddPeer(w.Name, w.Id, w.GrpcPeer)
-		peerClient := PeerMgr.GetPeer(w.Name)
-		peerClient.peerConn, err = common.DialGRPCPeer(context.Background(),
+		peerClient := PeerMgr.AddPeer(w.Name, w.Id, w.GrpcPeer)
+		peerConnection, err := common.DialGRPCPeer(context.Background(),
 			w.GrpcPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions)
 		if err != nil {
 			return fmt.Errorf("connect to peer %s: %w", w.GrpcPeer, err)
 		}
-		peerClient.peerSession = pb.NewWorkerClient(peerClient.peerConn)
+		if !PeerMgr.SetPeerConnection(peerClient, peerConnection) {
+			return fmt.Errorf("peer registration was replaced during bootstrap")
+		}
 		ctx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 		resp, err := peerClient.peerSession.SayHelloPeer(
 			ctx, &pb.HelloPeerReq{SourceName: s.WorkerName, TargetName: w.Name, WorkerPeer: grpcPeer})
@@ -140,7 +141,10 @@ func (s *Service) Init() (err error) {
 			cancel2()
 			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
-		peerClient.ScatterHandler.SetClient(stream)
+		if peerClient.ScatterHandler.SetClient(stream) == 0 {
+			cancel2()
+			return fmt.Errorf("peer registration was replaced while binding streams")
+		}
 
 		// install load action
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
@@ -149,7 +153,10 @@ func (s *Service) Init() (err error) {
 			cancel2()
 			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
-		peerClient.LoadActionHandler.SetClient(stream2)
+		if peerClient.LoadActionHandler.SetClient(stream2) == 0 {
+			cancel2()
+			return fmt.Errorf("peer registration was replaced while binding streams")
+		}
 
 		// install step end
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
@@ -158,7 +165,10 @@ func (s *Service) Init() (err error) {
 			cancel2()
 			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
-		peerClient.StepEndHandler.SetClient(stream3)
+		if peerClient.StepEndHandler.SetClient(stream3) == 0 {
+			cancel2()
+			return fmt.Errorf("peer registration was replaced while binding streams")
+		}
 
 		// install setting action
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
@@ -167,7 +177,10 @@ func (s *Service) Init() (err error) {
 			cancel2()
 			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
-		peerClient.SettingActionHandler.SetClient(stream4)
+		if peerClient.SettingActionHandler.SetClient(stream4) == 0 {
+			cancel2()
+			return fmt.Errorf("peer registration was replaced while binding streams")
+		}
 
 		logrus.Infof("say hello peer %s, ok, %s", w.GrpcPeer, resp.GetStatus())
 		cancel2()
@@ -220,16 +233,16 @@ func (s *Service) Run() {
 
 	//与peer worker的连接
 	for _, w := range PeerMgr.GetAllWorkers() {
-		if w.ScatterHandler.mode == HandlerModeClient {
+		if w.ScatterHandler.IsClient() {
 			go w.ScatterHandler.RecvHandler(w.Name)
 		}
-		if w.LoadActionHandler.mode == HandlerModeClient {
+		if w.LoadActionHandler.IsClient() {
 			go w.LoadActionHandler.RecvHandler(w.Name)
 		}
-		if w.StepEndHandler.mode == HandlerModeClient {
+		if w.StepEndHandler.IsClient() {
 			go w.StepEndHandler.RecvHandler(w.Name)
 		}
-		if w.SettingActionHandler.mode == HandlerModeClient {
+		if w.SettingActionHandler.IsClient() {
 			go w.SettingActionHandler.RecvHandler(w.Name)
 		}
 	}
@@ -326,15 +339,17 @@ func (s *Service) ReconnectMaster() {
 		if peer != nil {
 			continue
 		}
-		PeerMgr.AddPeer(workerInfo.Name, workerInfo.Id, workerInfo.GrpcPeer)
-		peerClient := PeerMgr.GetPeer(workerInfo.Name)
-		peerClient.peerConn, err = common.DialGRPCPeer(context.Background(),
+		peerClient := PeerMgr.AddPeer(workerInfo.Name, workerInfo.Id, workerInfo.GrpcPeer)
+		peerConnection, err := common.DialGRPCPeer(context.Background(),
 			workerInfo.GrpcPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions)
 		if err != nil {
 			logrus.Errorf("connect to peer %s error: %s", workerInfo.GrpcPeer, err)
 			return
 		}
-		peerClient.peerSession = pb.NewWorkerClient(peerClient.peerConn)
+		if !PeerMgr.SetPeerConnection(peerClient, peerConnection) {
+			logrus.Error("peer registration was replaced during reconnect")
+			return
+		}
 		ctx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel2()
 		resp, err := peerClient.peerSession.SayHelloPeer(
@@ -351,7 +366,10 @@ func (s *Service) ReconnectMaster() {
 			logrus.Errorf("create scatter stream peer: %s error: %s", workerInfo.GrpcPeer, err)
 			return
 		}
-		peerClient.ScatterHandler.SetClient(stream)
+		if peerClient.ScatterHandler.SetClient(stream) == 0 {
+			logrus.Error("peer registration was replaced while binding streams")
+			return
+		}
 
 		// install load action
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
@@ -360,7 +378,10 @@ func (s *Service) ReconnectMaster() {
 			logrus.Errorf("create load action stream peer: %s error: %s", workerInfo.GrpcPeer, err)
 			return
 		}
-		peerClient.LoadActionHandler.SetClient(stream2)
+		if peerClient.LoadActionHandler.SetClient(stream2) == 0 {
+			logrus.Error("peer registration was replaced while binding streams")
+			return
+		}
 
 		// install step end
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
@@ -369,7 +390,10 @@ func (s *Service) ReconnectMaster() {
 			logrus.Errorf("create step end stream peer: %s error: %s", workerInfo.GrpcPeer, err)
 			return
 		}
-		peerClient.StepEndHandler.SetClient(stream3)
+		if peerClient.StepEndHandler.SetClient(stream3) == 0 {
+			logrus.Error("peer registration was replaced while binding streams")
+			return
+		}
 
 		// install setting action
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
@@ -378,20 +402,23 @@ func (s *Service) ReconnectMaster() {
 			logrus.Errorf("create step end stream peer: %s error: %s", workerInfo.GrpcPeer, err)
 			return
 		}
-		peerClient.SettingActionHandler.SetClient(stream4)
+		if peerClient.SettingActionHandler.SetClient(stream4) == 0 {
+			logrus.Error("peer registration was replaced while binding streams")
+			return
+		}
 
 		logrus.Infof("say hello peer %s, ok, %s", workerInfo.GrpcPeer, resp.GetStatus())
 		cancel2()
-		if peerClient.ScatterHandler.mode == HandlerModeClient {
+		if peerClient.ScatterHandler.IsClient() {
 			go peerClient.ScatterHandler.RecvHandler(peerClient.Name)
 		}
-		if peerClient.LoadActionHandler.mode == HandlerModeClient {
+		if peerClient.LoadActionHandler.IsClient() {
 			go peerClient.LoadActionHandler.RecvHandler(peerClient.Name)
 		}
-		if peerClient.StepEndHandler.mode == HandlerModeClient {
+		if peerClient.StepEndHandler.IsClient() {
 			go peerClient.StepEndHandler.RecvHandler(peerClient.Name)
 		}
-		if peerClient.SettingActionHandler.mode == HandlerModeClient {
+		if peerClient.SettingActionHandler.IsClient() {
 			go peerClient.SettingActionHandler.RecvHandler(peerClient.Name)
 		}
 	}
