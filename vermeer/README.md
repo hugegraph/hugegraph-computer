@@ -402,7 +402,8 @@ worker_group = default
 
 Vermeer exposes a REST API on port `6688` (configurable in `master.ini`).
 
-> **Note**: The Web UI (`/ui/*`) is only available when `auth=token` is configured. Set `auth_token_factor` in `master.ini` or pass `-auth token -auth_token_factor <value>` via command line.
+> **Note**: The Web UI at `/` (with static assets under `/ui/*`) is only available when `auth=token` is configured.
+> Configure the signing factor through `VERMEER_AUTH_TOKEN_FACTOR_FILE` for deployments, or `auth_token_factor` for local use.
 
 ### Key Endpoints
 
@@ -415,7 +416,7 @@ Vermeer exposes a REST API on port `6688` (configurable in `master.ini`).
 | `/api/v1/tasks/{task_id}` | GET | Get task status and results |
 | `/api/v1/workers` | GET | List connected workers |
 | `/api/v1/workers/availability` | GET | Read worker readiness for the authenticated space |
-| `/ui/` | GET | Web UI dashboard |
+| `/` | GET | Web UI dashboard |
 
 Worker availability uses the normal space credential and returns only
 `{"available":true|false}` for that authenticated space's allocations or the
@@ -646,7 +647,7 @@ vermeer/tools/protoc/linux64/protoc vermeer/apps/protos/*.proto --go-grpc_out=ve
 
 ## Monitoring
 
-Access the Web UI dashboard at `http://master-ip:6688/ui/master.html` for:
+Access the Web UI dashboard at `http://master-ip:6688/` for:
 
 > **Note**: The Web UI requires `auth=token` in `master.ini` (or `-auth token` via command line). Without token authentication, the UI routes are not registered.
 
