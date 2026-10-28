@@ -56,8 +56,10 @@ func (th *TasksHandler) GET(ctx *gin.Context) {
 }
 
 func (th *TasksHandler) POST(ctx *gin.Context) {
-	ctx.JSON(http.StatusOK, gin.H{
-		"code": http.StatusOK,
+	ctx.Header("Allow", http.MethodGet)
+	ctx.JSON(http.StatusMethodNotAllowed, common.BaseResp{
+		ErrCode: -1,
+		Message: "Task collection is read-only; submit tasks with POST /api/v1/tasks/create",
 	})
 }
 
