@@ -64,9 +64,11 @@ type WorkerClient struct {
 	//LoadStream      pb.Master_LoadGraphTaskServer `json:"-"`
 	//ComputeStream   pb.Master_ComputeTaskServer   `json:"-"`
 	//SuperStepStream pb.Master_SuperStepServer     `json:"-"`
-	Connection  *grpc.ClientConn `json:"-"`
-	Session     pb.WorkerClient  `json:"-"`
-	taskStreams [taskStreamCount]context.Context
+	Connection       *grpc.ClientConn `json:"-"`
+	Session          pb.WorkerClient  `json:"-"`
+	taskStreams      [taskStreamCount]context.Context
+	taskStreamsEnded [taskStreamCount]bool
+	offlineCleanup   bool
 }
 
 func (wc *WorkerClient) Close() {
@@ -233,11 +235,86 @@ func (wm *workerManager) GetAllWorkers() []*WorkerClient {
 	return SortWorkersAsc(map2Workers(wm.workersByName))
 }
 
+// GetBootstrapWorkers retains newly registering peers, but excludes terminated sessions.
+func (wm *workerManager) GetBootstrapWorkers() []*WorkerClient {
+	defer wm.Unlock(wm.Lock())
+	peers := make([]*WorkerClient, 0, len(wm.workersByName))
+	for _, worker := range wm.workersByName {
+		if !wm.sessionEndedLocked(worker) {
+			peers = append(peers, worker)
+		}
+	}
+	return SortWorkersAsc(peers)
+}
+
+func (wm *workerManager) sessionEndedLocked(worker *WorkerClient) bool {
+	if worker.offlineCleanup || wm.abandonedRegistrationLocked(worker) || (worker.Connection != nil && worker.Connection.GetState() == connectivity.Shutdown) {
+		return true
+	}
+	for stream, ctx := range worker.taskStreams {
+		if worker.taskStreamsEnded[stream] || (ctx != nil && ctx.Err() != nil) {
+			return true
+		}
+	}
+	return false
+}
+
+// CanReplaceDisconnectedSession requires a completed reverse dial and observed disconnection.
+func (wm *workerManager) CanReplaceDisconnectedSession(worker *WorkerClient) bool {
+	defer wm.Unlock(wm.Lock())
+	return worker != nil && wm.workersByName[worker.Name] == worker && !worker.offlineCleanup && worker.Connection != nil &&
+		wm.sessionEndedLocked(worker)
+}
+
+// A registration that never opened its lifeline cannot recover after its transport is lost.
+func (wm *workerManager) IsAbandonedRegistration(worker *WorkerClient) bool {
+	defer wm.Unlock(wm.Lock())
+	return worker != nil && wm.workersByName[worker.Name] == worker && wm.abandonedRegistrationLocked(worker)
+}
+
+func (wm *workerManager) abandonedRegistrationLocked(worker *WorkerClient) bool {
+	if worker.Connection == nil {
+		return false
+	}
+	state := worker.Connection.GetState()
+	if state != connectivity.TransientFailure && state != connectivity.Shutdown {
+		return false
+	}
+	for stream, ctx := range worker.taskStreams {
+		if ctx != nil || worker.taskStreamsEnded[stream] {
+			return false
+		}
+	}
+	return true
+}
+
+// ClaimOfflineSession gives only one old stream ownership of its session cleanup.
+func (wm *workerManager) ClaimOfflineSession(worker *WorkerClient) bool {
+	defer wm.Unlock(wm.Lock())
+	if worker == nil || wm.workersByName[worker.Name] != worker || worker.offlineCleanup {
+		return false
+	}
+	if !wm.sessionEndedLocked(worker) {
+		return false
+	}
+	worker.offlineCleanup = true
+	return true
+}
+
+// RemoveWorkerSession cannot remove a new registration that reuses the same name.
+func (wm *workerManager) RemoveWorkerSession(worker *WorkerClient) {
+	defer wm.Unlock(wm.Lock())
+	if worker != nil && wm.workersByName[worker.Name] == worker {
+		delete(wm.workersByName, worker.Name)
+		common.PrometheusMetrics.WorkerCnt.WithLabelValues().Dec()
+	}
+}
+
 func (wm *workerManager) CheckWorkerAlive(name string) bool {
 	defer wm.Unlock(wm.Lock())
 	worker, ok := wm.workersByName[name]
 
-	if !ok || worker.Connection == nil || worker.Connection.GetState() != connectivity.Ready {
+	if !ok || wm.sessionEndedLocked(worker) || worker.Connection == nil || worker.Connection.GetState() != connectivity.Ready {
 		return false
 	}
 
@@ -255,6 +332,7 @@ func (wm *workerManager) SetTaskStream(worker *WorkerClient, stream TaskStream, 
 	defer wm.Unlock(wm.Lock())
 	if worker != nil && wm.workersByName[worker.Name] == worker {
 		worker.taskStreams[stream] = ctx
+		worker.taskStreamsEnded[stream] = false
 	}
 }
 
@@ -262,6 +340,7 @@ func (wm *workerManager) ClearTaskStream(worker *WorkerClient, stream TaskStream
 	defer wm.Unlock(wm.Lock())
 	if worker != nil && wm.workersByName[worker.Name] == worker && worker.taskStreams[stream] == ctx {
 		worker.taskStreams[stream] = nil
+		worker.taskStreamsEnded[stream] = true
 	}
 }
 
@@ -271,7 +350,7 @@ func (wm *workerManager) IsWorkerReady(worker *WorkerClient) bool {
 }
 
 func (wm *workerManager) workerReadyLocked(worker *WorkerClient) bool {
-	if worker == nil || wm.workersByName[worker.Name] != worker ||
+	if worker == nil || wm.workersByName[worker.Name] != worker || worker.offlineCleanup ||
 		worker.Connection == nil || worker.Connection.GetState() != connectivity.Ready {
 		return false
 	}

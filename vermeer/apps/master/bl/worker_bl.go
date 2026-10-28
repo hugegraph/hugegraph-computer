@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync"
 	. "vermeer/apps/master/graphs"
+	"vermeer/apps/master/workers"
 	"vermeer/apps/structure"
 
 	"github.com/sirupsen/logrus"
@@ -36,20 +37,28 @@ type WorkerBl struct {
 // KickOffline Checking the worker state and performing a forced termination if it's offline.
 // Return false if the worker is alive.
 func (wb *WorkerBl) KickOffline(workerName string) bool {
-	if !workerMgr.CheckWorkerAlive(workerName) {
+	return wb.KickOfflineSession(workerMgr.GetWorker(workerName))
+}
 
-		if err := wb.ReleaseWorker(workerName); err != nil {
-			logrus.Errorf("failed to perform ReleaseWorker with the name: %s as the worker is offline, caused by: %v", workerName, err)
-		}
-
-		return true
+func (wb *WorkerBl) KickOfflineSession(worker *workers.WorkerClient) bool {
+	if !workerMgr.ClaimOfflineSession(worker) {
+		return false
 	}
-
-	return false
+	if worker.Connection != nil {
+		_ = worker.Connection.Close()
+	}
+	if err := wb.releaseWorker(worker.Name, worker); err != nil {
+		logrus.Errorf("failed to release offline worker %s: %v", worker.Name, err)
+	}
+	return true
 }
 
 // ReleaseWorker Release the graph loaded by the worker, cancel the task running in the worker, and remove the worker from the WorkerManager.
 func (wb *WorkerBl) ReleaseWorker(workerName string) error {
+	return wb.releaseWorker(workerName, nil)
+}
+
+func (wb *WorkerBl) releaseWorker(workerName string, session *workers.WorkerClient) error {
 	graphs := graphMgr.GetGraphsByWorker(workerName)
 
 	if len(graphs) == 0 {
@@ -78,7 +87,11 @@ func (wb *WorkerBl) ReleaseWorker(workerName string) error {
 		}
 	}
 
-	workerMgr.RemoveWorker(workerName)
+	if session != nil {
+		workerMgr.RemoveWorkerSession(session)
+	} else {
+		workerMgr.RemoveWorker(workerName)
+	}
 
 	return nil
 }

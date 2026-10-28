@@ -19,6 +19,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -57,8 +58,19 @@ type Service struct {
 	WorkerId           int32
 }
 
-func (s *Service) Init() error {
-	var err error
+func (s *Service) Init() (err error) {
+	defer func() {
+		if err != nil {
+			if s.masterConn != nil {
+				_ = s.masterConn.Close()
+			}
+			for _, peer := range PeerMgr.GetAllWorkers() {
+				if peer.peerConn != nil {
+					_ = peer.peerConn.Close()
+				}
+			}
+		}
+	}()
 	//node, err := snowflake.NewNode(rand.Int63n(1023))
 	//if err != nil {
 	//	logrus.Errorf("new snowflake error: %s", err)
@@ -77,8 +89,8 @@ func (s *Service) Init() error {
 		grpc.MaxCallSendMsgSize(4*1024*1024*1024),
 		grpc.MaxCallRecvMsgSize(4*1024*1024*1024))
 
-	s.masterConn, err = grpc.Dial(
-		masterPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions, grpc.WithBlock(), grpc.WithIdleTimeout(0))
+	s.masterConn, err = common.DialGRPCPeer(context.Background(),
+		masterPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions)
 	if err != nil {
 		logrus.Errorf("connect master error: %s", err)
 		return err
@@ -97,28 +109,36 @@ func (s *Service) Init() error {
 	logrus.Infof("Hello World, I am worker %s", s.WorkerName)
 	PeerMgr.AddPeer(s.WorkerName, s.WorkerId, grpcPeer)
 	md := metadata.New(map[string]string{"worker_name": s.WorkerName})
+	// Keep registration tied to a live stream even if peer bootstrap fails.
+	// Compute/SuperStep stay unopened until the entire peer mesh is installed.
+	loadCtx := metadata.NewOutgoingContext(context.Background(), md)
+	s.LoadGraphHandler.grpcStream, err = s.MasterClient.LoadGraphTask(loadCtx)
+	if err != nil {
+		return fmt.Errorf("open registration lifeline: %w", err)
+	}
 	for _, w := range resp.GetWorkers() {
 		PeerMgr.AddPeer(w.Name, w.Id, w.GrpcPeer)
 		peerClient := PeerMgr.GetPeer(w.Name)
-		peerClient.peerConn, err = grpc.Dial(
-			w.GrpcPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions, grpc.WithBlock(), grpc.WithIdleTimeout(0))
+		peerClient.peerConn, err = common.DialGRPCPeer(context.Background(),
+			w.GrpcPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions)
 		if err != nil {
-			logrus.Fatalf("connect to peer %s error: %s", w.GrpcPeer, err)
-			return err
+			return fmt.Errorf("connect to peer %s: %w", w.GrpcPeer, err)
 		}
 		peerClient.peerSession = pb.NewWorkerClient(peerClient.peerConn)
 		ctx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 		resp, err := peerClient.peerSession.SayHelloPeer(
 			ctx, &pb.HelloPeerReq{SourceName: s.WorkerName, TargetName: w.Name, WorkerPeer: grpcPeer})
 		if err != nil {
-			logrus.Fatalf("say hello peer %s error: %s", w.GrpcPeer, err)
+			cancel2()
+			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
 
 		// install scatter
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream, err := peerClient.peerSession.Scatter(ctx)
 		if err != nil {
-			logrus.Fatalf("create scatter stream peer: %s error: %s", w.GrpcPeer, err)
+			cancel2()
+			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
 		peerClient.ScatterHandler.SetClient(stream)
 
@@ -126,7 +146,8 @@ func (s *Service) Init() error {
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream2, err := peerClient.peerSession.LoadAction(ctx)
 		if err != nil {
-			logrus.Fatalf("create load action stream peer: %s error: %s", w.GrpcPeer, err)
+			cancel2()
+			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
 		peerClient.LoadActionHandler.SetClient(stream2)
 
@@ -134,7 +155,8 @@ func (s *Service) Init() error {
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream3, err := peerClient.peerSession.StepEnd(ctx)
 		if err != nil {
-			logrus.Fatalf("create step end stream peer: %s error: %s", w.GrpcPeer, err)
+			cancel2()
+			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
 		peerClient.StepEndHandler.SetClient(stream3)
 
@@ -142,7 +164,8 @@ func (s *Service) Init() error {
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream4, err := peerClient.peerSession.SettingAction(ctx)
 		if err != nil {
-			logrus.Fatalf("create step end stream peer: %s error: %s", w.GrpcPeer, err)
+			cancel2()
+			return fmt.Errorf("bootstrap peer %s: %w", w.GrpcPeer, err)
 		}
 		peerClient.SettingActionHandler.SetClient(stream4)
 
@@ -150,14 +173,6 @@ func (s *Service) Init() error {
 		cancel2()
 	}
 	logrus.Infof("say hello master ok, worker id: %d", s.WorkerId)
-
-	ctx = metadata.NewOutgoingContext(context.Background(), md)
-	s.LoadGraphHandler.grpcStream, err = s.MasterClient.LoadGraphTask(ctx)
-	if err != nil {
-		logrus.Errorf("create load graph task stream error: %s", err)
-		return err
-	}
-	logrus.Infof("create load graph task stream ok")
 
 	ctx = metadata.NewOutgoingContext(context.Background(), md)
 	s.ComputeTaskHandler.grpcStream, err = s.MasterClient.ComputeTask(ctx)
@@ -232,7 +247,9 @@ func (s *Service) CheckMasterAlive() bool {
 	if s.masterConn == nil || s.masterConn.GetState() != connectivity.Ready {
 		return false
 	}
-	return true
+	return s.LoadGraphHandler != nil && s.LoadGraphHandler.grpcStream != nil && s.LoadGraphHandler.grpcStream.Context().Err() == nil &&
+		s.ComputeTaskHandler != nil && s.ComputeTaskHandler.grpcStream != nil && s.ComputeTaskHandler.grpcStream.Context().Err() == nil &&
+		s.SuperStepHandler != nil && s.SuperStepHandler.grpcStream != nil && s.SuperStepHandler.grpcStream.Context().Err() == nil
 }
 
 func (s *Service) ReconnectMaster() {
@@ -242,6 +259,20 @@ func (s *Service) ReconnectMaster() {
 		logrus.Infof("master is alive:%v", s.masterConn.GetState())
 		return
 	}
+	bootstrapped := false
+	defer func() {
+		if !bootstrapped {
+			if s.masterConn != nil {
+				_ = s.masterConn.Close()
+				s.masterConn = nil
+			}
+			for _, peer := range PeerMgr.GetAllWorkers() {
+				if peer.peerConn != nil {
+					_ = peer.peerConn.Close()
+				}
+			}
+		}
+	}()
 	logrus.Infof("try to reconnect master")
 	//初始化
 	SpaceMgr.Init()
@@ -262,8 +293,8 @@ func (s *Service) ReconnectMaster() {
 		grpc.MaxCallRecvMsgSize(4*1024*1024*1024),
 	)
 	var err error
-	s.masterConn, err = grpc.Dial(
-		masterPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions, grpc.WithBlock(), grpc.WithIdleTimeout(0))
+	s.masterConn, err = common.DialGRPCPeer(context.Background(),
+		masterPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions)
 	if err != nil {
 		logrus.Errorf("connect master error: %s", err)
 		return
@@ -275,7 +306,6 @@ func (s *Service) ReconnectMaster() {
 		ctx, &pb.HelloMasterReq{WorkerPeer: grpcPeer, Version: version.Version})
 	if err != nil {
 		logrus.Infof("reconnect say hello master error:%v", err)
-		s.masterConn = nil
 		return
 	}
 	s.WorkerId = resp.GetWorkerId()
@@ -283,6 +313,13 @@ func (s *Service) ReconnectMaster() {
 	logrus.Infof("Reconnect, I am worker %s", s.WorkerName)
 	PeerMgr.AddPeer(s.WorkerName, s.WorkerId, grpcPeer)
 	md := metadata.New(map[string]string{"worker_name": s.WorkerName})
+	loadCtx := metadata.NewOutgoingContext(context.Background(), md)
+	tempLoadGraphGrpcStream, err := s.MasterClient.LoadGraphTask(loadCtx)
+	if err != nil {
+		logrus.Errorf("reconnect registration lifeline: %v", err)
+		return
+	}
+	s.LoadGraphHandler.grpcStream = tempLoadGraphGrpcStream
 	for _, workerInfo := range resp.GetWorkers() {
 		//对已建立grpc连接的peer忽略。建立未知peer的grpc连接，并启动handler
 		peer := PeerMgr.GetPeer(workerInfo.GetName())
@@ -291,25 +328,28 @@ func (s *Service) ReconnectMaster() {
 		}
 		PeerMgr.AddPeer(workerInfo.Name, workerInfo.Id, workerInfo.GrpcPeer)
 		peerClient := PeerMgr.GetPeer(workerInfo.Name)
-		peerClient.peerConn, err = grpc.Dial(
-			workerInfo.GrpcPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions, grpc.WithBlock(), grpc.WithIdleTimeout(0))
+		peerClient.peerConn, err = common.DialGRPCPeer(context.Background(),
+			workerInfo.GrpcPeer, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions)
 		if err != nil {
-			logrus.Fatalf("connect to peer %s error: %s", workerInfo.GrpcPeer, err)
+			logrus.Errorf("connect to peer %s error: %s", workerInfo.GrpcPeer, err)
 			return
 		}
 		peerClient.peerSession = pb.NewWorkerClient(peerClient.peerConn)
 		ctx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel2()
 		resp, err := peerClient.peerSession.SayHelloPeer(
 			ctx, &pb.HelloPeerReq{SourceName: s.WorkerName, TargetName: workerInfo.Name, WorkerPeer: grpcPeer})
 		if err != nil {
-			logrus.Fatalf("say hello peer %s error: %s", workerInfo.GrpcPeer, err)
+			logrus.Errorf("say hello peer %s error: %s", workerInfo.GrpcPeer, err)
+			return
 		}
 
 		// install scatter
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream, err := peerClient.peerSession.Scatter(ctx)
 		if err != nil {
-			logrus.Fatalf("create scatter stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			logrus.Errorf("create scatter stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			return
 		}
 		peerClient.ScatterHandler.SetClient(stream)
 
@@ -317,7 +357,8 @@ func (s *Service) ReconnectMaster() {
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream2, err := peerClient.peerSession.LoadAction(ctx)
 		if err != nil {
-			logrus.Fatalf("create load action stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			logrus.Errorf("create load action stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			return
 		}
 		peerClient.LoadActionHandler.SetClient(stream2)
 
@@ -325,7 +366,8 @@ func (s *Service) ReconnectMaster() {
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream3, err := peerClient.peerSession.StepEnd(ctx)
 		if err != nil {
-			logrus.Fatalf("create step end stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			logrus.Errorf("create step end stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			return
 		}
 		peerClient.StepEndHandler.SetClient(stream3)
 
@@ -333,7 +375,8 @@ func (s *Service) ReconnectMaster() {
 		ctx = metadata.NewOutgoingContext(context.Background(), md)
 		stream4, err := peerClient.peerSession.SettingAction(ctx)
 		if err != nil {
-			logrus.Fatalf("create step end stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			logrus.Errorf("create step end stream peer: %s error: %s", workerInfo.GrpcPeer, err)
+			return
 		}
 		peerClient.SettingActionHandler.SetClient(stream4)
 
@@ -354,15 +397,6 @@ func (s *Service) ReconnectMaster() {
 	}
 
 	ctx = metadata.NewOutgoingContext(context.Background(), md)
-	tempLoadGraphGrpcStream, err := s.MasterClient.LoadGraphTask(ctx)
-	if err != nil {
-		logrus.Errorf("reconnect create load graph task stream error: %s", err)
-		return
-	}
-	s.LoadGraphHandler.grpcStream = tempLoadGraphGrpcStream
-	logrus.Infof("reconnect create load graph task stream ok")
-
-	ctx = metadata.NewOutgoingContext(context.Background(), md)
 	tempComputeGrpcStream, err := s.MasterClient.ComputeTask(ctx)
 	if err != nil {
 		logrus.Errorf("reconnect create load graph task stream error: %s", err)
@@ -380,4 +414,5 @@ func (s *Service) ReconnectMaster() {
 	}
 	s.SuperStepHandler.grpcStream = tempSuperStepGrpcStream
 	logrus.Infof("reconnect create super step stream ok")
+	bootstrapped = true
 }

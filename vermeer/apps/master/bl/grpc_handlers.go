@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"vermeer/apps/common"
 	"vermeer/apps/compute"
 	"vermeer/apps/graphio"
 	"vermeer/apps/master/schedules"
@@ -52,6 +53,9 @@ func (h *ServerHandler) Init() {
 func (h *ServerHandler) SayHelloMaster(ctx context.Context, req *pb.HelloMasterReq) (*pb.HelloMasterResp, error) {
 	h.locker.Lock()
 	defer h.locker.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p, _ := peer.FromContext(ctx)
 
 	// check worker version, if not match, deny
@@ -80,6 +84,10 @@ func (h *ServerHandler) SayHelloMaster(ctx context.Context, req *pb.HelloMasterR
 	workers := workerMgr.GetAllWorkers()
 	var existWorkerName string
 	for _, worker := range workers {
+		if workerMgr.IsAbandonedRegistration(worker) {
+			workerBl.KickOfflineSession(worker)
+			continue
+		}
 		if worker.GrpcPeer == ip+":"+port {
 			existWorkerName = worker.Name
 			break
@@ -87,9 +95,17 @@ func (h *ServerHandler) SayHelloMaster(ctx context.Context, req *pb.HelloMasterR
 	}
 	if existWorkerName != "" {
 		//如果worker已经存在，必须等待至grpc recv handler感知后，删除worker
-		for workerMgr.GetWorker(existWorkerName) != nil {
+		for existing := workerMgr.GetWorker(existWorkerName); existing != nil; existing = workerMgr.GetWorker(existWorkerName) {
+			if workerMgr.CanReplaceDisconnectedSession(existing) {
+				workerBl.KickOfflineSession(existing)
+				continue
+			}
 			logrus.Infof("worker %v exist, wait one second", existWorkerName)
-			time.Sleep(1 * time.Second)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Second):
+			}
 		}
 	}
 
@@ -104,6 +120,16 @@ func (h *ServerHandler) SayHelloMaster(ctx context.Context, req *pb.HelloMasterR
 		logrus.Errorf("failed to add a WorkerClient to the WorkerManager, error: %s", err)
 		return &pb.HelloMasterResp{}, err
 	}
+	registered := false
+	defer func() {
+		if !registered {
+			workerMgr.RemoveWorkerSession(reqWorker)
+			if reqWorker.Connection != nil {
+				_ = reqWorker.Connection.Close()
+			}
+		}
+	}()
+
 	_, err = Scheduler.ChangeWorkerStatus(reqWorker.Name, schedules.WorkerOngoingStatusIdle)
 	if err != nil {
 		logrus.Errorf("failed to change worker status to idle, error: %s", err)
@@ -117,27 +143,14 @@ func (h *ServerHandler) SayHelloMaster(ctx context.Context, req *pb.HelloMasterR
 		WorkerName: reqWorker.Name,
 	}
 
-	for _, v := range workers {
-		if v.GrpcPeer == ip+":"+port {
-			logrus.Debugf("workerMgr has a duplicate address, ignore it")
-			continue
-		}
-		workerInfo := pb.WorkerInfo{
-			Name:     v.Name,
-			Id:       v.Id,
-			GrpcPeer: v.GrpcPeer,
-		}
-		resp.Workers = append(resp.Workers, &workerInfo)
-	}
-
 	// connect to client
 	workerClient := workerMgr.GetWorker(reqWorker.Name)
 	dialOptions := grpc.WithDefaultCallOptions(
 		grpc.MaxCallSendMsgSize(1*1024*1024*1024),
 		grpc.MaxCallRecvMsgSize(1*1024*1024*1024))
 
-	connection, err := grpc.Dial(
-		ip+":"+port, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions, grpc.WithBlock(), grpc.WithIdleTimeout(0))
+	connection, err := common.DialGRPCPeer(ctx,
+		ip+":"+port, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOptions)
 	if err != nil {
 		logrus.Errorf("connect worker error: %s", err)
 		return &resp, err
@@ -149,7 +162,10 @@ func (h *ServerHandler) SayHelloMaster(ctx context.Context, req *pb.HelloMasterR
 		resp.Spaces = append(resp.Spaces, space.Name())
 	}
 
-	initWorkerClient(workerClient)
+	initWorkerClient(ctx, workerClient)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	graphs := graphMgr.GetGraphsByWorker(reqWorker.Name)
 	taskCanRecovery := make([]*structure.TaskInfo, 0)
@@ -195,13 +211,27 @@ func (h *ServerHandler) SayHelloMaster(ctx context.Context, req *pb.HelloMasterR
 			logrus.Infof("worker:%v recovery task:%v type:%v ", workerClient.Name, task.ID, task.Type)
 		}
 	}()
+	for _, v := range workerMgr.GetBootstrapWorkers() {
+		if v.GrpcPeer == ip+":"+port {
+			logrus.Debugf("workerMgr has a duplicate address, ignore it")
+			continue
+		}
+		workerInfo := pb.WorkerInfo{
+			Name:     v.Name,
+			Id:       v.Id,
+			GrpcPeer: v.GrpcPeer,
+		}
+		resp.Workers = append(resp.Workers, &workerInfo)
+	}
+
+	registered = true
 	return &resp, nil
 }
 
-func initWorkerClient(workerClient *workers.WorkerClient) {
+func initWorkerClient(ctx context.Context, workerClient *workers.WorkerClient) {
 	logrus.Infof("init worker: %s@%s", workerClient.Name, workerClient.GrpcPeer)
 	// init memory limit
-	err := workers.SendMemLimit(workerClient, &workers.WorkerMemLimit{
+	err := workers.SendMemLimitContext(ctx, workerClient, &workers.WorkerMemLimit{
 		MaxMem:  threshold.GroupMaxMemory(workerClient.Group),
 		MinFree: threshold.GroupMinFree(workerClient.Group),
 		GcRatio: float32(threshold.GroupGcPct(workerClient.Group)) / 100,
@@ -382,6 +412,7 @@ func (h *ServerHandler) UploadTPResult(ctx context.Context, in *pb.UploadTPResul
 
 type LoadGraphServer struct {
 	streamServer pb.Master_LoadGraphTaskServer
+	worker       *workers.WorkerClient
 	sendMutex    sync.Mutex
 }
 
@@ -391,20 +422,16 @@ func (s *LoadGraphServer) SetServer(stream pb.Master_LoadGraphTaskServer) {
 
 func (s *LoadGraphServer) RecvHandler(workerName string) {
 	logrus.Infof("load graph task recv handler setup: %s", workerName)
+	worker := s.worker
 	for {
 		req, err := s.streamServer.Recv()
 		if err != nil {
 			logrus.Errorf("load graph task recv: %s", err)
+			workerMgr.ClearTaskStream(worker, workers.LoadTaskStream, s.streamServer.Context())
 			time.Sleep(3 * time.Second)
 
-			if workerBl.KickOffline(workerName) {
-				break
-			}
-			// if !WorkerMgr.CheckWorkerAlive(workerName) {
-			// 	WorkerMgr.RemoveWorker(workerName)
-			// 	break
-			// }
-			continue
+			workerBl.KickOfflineSession(worker)
+			return
 		}
 		if req.State == graphio.LoadPartStatusPrepared {
 		} else if req.State == graphio.LoadPartStatusDone {
@@ -457,6 +484,7 @@ func (s *LoadGraphServer) AsyncLoad(
 
 type ComputeTaskServer struct {
 	streamServer pb.Master_ComputeTaskServer
+	worker       *workers.WorkerClient
 }
 
 func (s *ComputeTaskServer) SetServer(stream pb.Master_ComputeTaskServer) {
@@ -465,20 +493,16 @@ func (s *ComputeTaskServer) SetServer(stream pb.Master_ComputeTaskServer) {
 
 func (s *ComputeTaskServer) RecvHandler(workerName string) {
 	logrus.Infof("compute task recv handler setup: %s", workerName)
+	worker := s.worker
 	for {
 		req, err := s.streamServer.Recv()
 		if err != nil {
 			logrus.Errorf("compute task recv error: %s", err)
+			workerMgr.ClearTaskStream(worker, workers.ComputeTaskStream, s.streamServer.Context())
 			time.Sleep(3 * time.Second)
 
-			if workerBl.KickOffline(workerName) {
-				break
-			}
-			// if !WorkerMgr.CheckWorkerAlive(workerName) {
-			// 	WorkerMgr.RemoveWorker(workerName)
-			// 	break
-			// }
-			continue
+			workerBl.KickOfflineSession(worker)
+			return
 		}
 		_ = req
 	}

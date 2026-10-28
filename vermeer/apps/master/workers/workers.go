@@ -18,6 +18,7 @@ under the License.
 package workers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -29,6 +30,10 @@ var WorkerManager = &workerManager{}
 var manager = WorkerManager
 
 func SendMemLimit(worker *WorkerClient, memLimit *WorkerMemLimit) error {
+	return SendMemLimitContext(context.Background(), worker, memLimit)
+}
+
+func SendMemLimitContext(ctx context.Context, worker *WorkerClient, memLimit *WorkerMemLimit) error {
 	if worker == nil {
 		return errors.New("the argument `worker` cannot be nil")
 	}
@@ -36,7 +41,7 @@ func SendMemLimit(worker *WorkerClient, memLimit *WorkerMemLimit) error {
 		return errors.New("the argument `memLimit` cannot be empty")
 	}
 
-	if _, err := doSendMemoryLimitReq(worker, toMemoryLimitReq(memLimit)); err != nil {
+	if _, err := doSendMemoryLimitReqContext(ctx, worker, toMemoryLimitReq(memLimit)); err != nil {
 		return fmt.Errorf("failed to send memory limit req to worker %s: %w", worker.Name, err)
 	}
 	logrus.Infof("sent memory limit '%s' via group '%s' to worker %s@%s", memLimit.toString(), worker.Group, worker.Name, worker.GrpcPeer)
