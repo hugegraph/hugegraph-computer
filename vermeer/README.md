@@ -259,7 +259,8 @@ openssl rand -hex 32 > config/token-factor
 
 Set `VERMEER_AUTH_TOKEN_FACTOR_FILE=/path/to/token-factor`, or set `auth_token_factor_file` in Master's INI file.
 The environment file takes precedence over the INI file, and either file takes precedence over `auth_token_factor`.
-The file must contain one valid UTF-8 line with at least four characters and cannot contain only whitespace.
+The file must contain one valid UTF-8 line with at least 16 characters and cannot contain only whitespace.
+Use a randomly generated value; the example above provides 32 random bytes encoded as 64 hexadecimal characters.
 A terminal LF or CRLF is accepted; other spaces are preserved. An invalid configured file stops Master before it opens its listeners;
 it never falls back to an inline or default factor.
 
