@@ -25,6 +25,8 @@ import (
 	"unicode/utf8"
 )
 
+const minTokenSigningKeyCharacters = 16
+
 // ReadTokenFactorFile is shared by the Master and the native token generator.
 // A single terminal newline is accepted; no other whitespace is changed.
 func ReadTokenFactorFile(file string) (string, error) {
@@ -40,9 +42,10 @@ func ReadTokenFactorFile(file string) (string, error) {
 }
 
 func validateTokenSigningKey(factor string) error {
-	if !utf8.ValidString(factor) || utf8.RuneCountInString(factor) < 4 ||
+	if !utf8.ValidString(factor) ||
+		utf8.RuneCountInString(factor) < minTokenSigningKeyCharacters ||
 		strings.TrimSpace(factor) == "" || strings.ContainsAny(factor, "\r\n") {
-		return errors.New("token signing key must contain one UTF-8 line of at least four characters")
+		return errors.New("token signing key must contain one UTF-8 line of at least 16 characters")
 	}
 	return nil
 }
