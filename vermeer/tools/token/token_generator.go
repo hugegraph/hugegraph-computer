@@ -19,18 +19,58 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"vermeer/apps/auth"
 )
 
 func main() {
-	user := flag.String("user", "foo", "user name")
-	space := flag.String("space", "bar", "space name")
-	factor := flag.String("factor", "1234", "token factor")
-	client := flag.String("client", "hg", "client identifier")
-	immortal := flag.Bool("i", false, "immortal token")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("vermeer-token", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	user := flags.String("user", "foo", "user name")
+	space := flags.String("space", "bar", "space name")
+	factor := flags.String("factor", "1234", "token factor (prefer -factor-file for deployment secrets)")
+	factorFile := flags.String("factor-file", "", "read the token factor from this file")
+	outputFile := flags.String("output-file", "", "write only the token to this file with mode 0600")
+	quiet := flags.Bool("quiet", false, "print only the token when -output-file is not set")
+	client := flags.String("client", "hg", "client identifier")
+	immortal := flags.Bool("i", false, "immortal token")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("unexpected positional arguments")
+	}
+	if *user == "" {
+		return errors.New("user must not be empty")
+	}
+	if *factorFile != "" {
+		factorSpecified := false
+		flags.Visit(func(f *flag.Flag) { factorSpecified = factorSpecified || f.Name == "factor" })
+		if factorSpecified {
+			return errors.New("use either -factor or -factor-file")
+		}
+		var err error
+		*factor, err = auth.ReadTokenFactorFile(*factorFile)
+		if err != nil {
+			return err
+		}
+	}
 
 	factory := &auth.TokenFactory{Factor: *factor}
 	tokenObj := factory.NewToken(*user, *space, *client)
@@ -38,22 +78,39 @@ func main() {
 		tokenObj.Time = math.MaxInt64
 	}
 	factory.Sign(tokenObj)
-	jsonStr := toJson(*tokenObj)
-	token := auth.ToBase58(jsonStr)
-
-	println("    user:", *user)
-	println("   space:", *space)
-	println("  factor:", *factor)
-	println("  client:", *client)
-	println("immortal:", *immortal)
-	println("    json:", jsonStr)
-	println("   token:", token)
+	data, err := json.Marshal(tokenObj)
+	if err != nil {
+		return errors.New("encode token")
+	}
+	token := auth.ToBase58(string(data))
+	if *outputFile != "" {
+		return writeTokenFile(*outputFile, token)
+	}
+	if *quiet {
+		_, err = fmt.Fprintln(stdout, token)
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "    user: %s\n   space: %s\n  client: %s\nimmortal: %t\n   token: %s\n",
+		*user, *space, *client, *immortal, token)
+	return err
 }
 
-func toJson(d interface{}) string {
-	if b, err := json.Marshal(d); err == nil {
-		str := string(b)
-		return str
+func writeTokenFile(path, token string) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".vermeer-token-*")
+	if err != nil {
+		return fmt.Errorf("create token output: %w", err)
 	}
-	return ""
+	defer os.Remove(file.Name())
+	if _, err = file.WriteString(token + "\n"); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write token output: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("close token output: %w", err)
+	}
+	// Rename publishes a complete 0600 file and never follows a destination symlink.
+	if err = os.Rename(file.Name(), path); err != nil {
+		return fmt.Errorf("publish token output: %w", err)
+	}
+	return nil
 }

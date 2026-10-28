@@ -95,3 +95,75 @@ func TestHugegraphCredentialsFileFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestHugegraphPasswordFilePreservesSecretBytes(t *testing.T) {
+	isolatePDPeerConfig(t)
+	configured := filepath.Join(t.TempDir(), "configured-password")
+	override := filepath.Join(t.TempDir(), "environment-password")
+	const rawPassword = "  quote\"backslash\\dollar$Unicode密碼\n"
+	if err := os.WriteFile(configured, []byte("config-password"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(override, []byte(rawPassword), 0600); err != nil {
+		t.Fatal(err)
+	}
+	SetConfig("hugegraph_username", "config-user")
+	SetConfig("hugegraph_password_file", configured)
+	t.Setenv("VERMEER_HUGEGRAPH_USERNAME", "environment-user")
+	t.Setenv("VERMEER_HUGEGRAPH_PASSWORD_FILE", override)
+	username, password, err := ResolveHugegraphCredentials("task-user", "task-password")
+	if err != nil || username != "environment-user" || password != rawPassword {
+		t.Fatal("raw Secret contents must survive file reading without escaping or trimming")
+	}
+	t.Setenv("VERMEER_HUGEGRAPH_USERNAME", "")
+	t.Setenv("VERMEER_HUGEGRAPH_PASSWORD_FILE", "")
+	username, password, err = ResolveHugegraphCredentials("task-user", "task-password")
+	if err != nil || username != "config-user" || password != "config-password" {
+		t.Fatal("config username/password file must override task credentials")
+	}
+	explicit := filepath.Join(t.TempDir(), "credentials.json")
+	if err := os.WriteFile(explicit, []byte(`{"username":"json-user","password":"json-password"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VERMEER_HUGEGRAPH_CREDENTIALS_FILE", explicit)
+	t.Setenv("VERMEER_HUGEGRAPH_PASSWORD_FILE", filepath.Join(t.TempDir(), "missing"))
+	username, password, err = ResolveHugegraphCredentials("task-user", "task-password")
+	if err != nil || username != "json-user" || password != "json-password" {
+		t.Fatal("explicit JSON credentials must retain precedence over password-file credentials")
+	}
+}
+
+func TestHugegraphPasswordFileFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, username, contents string
+		create, file             bool
+	}{
+		{name: "missing-user", contents: "synthetic-sensitive-password", create: true, file: true},
+		{name: "missing-file-setting", username: "deployment-user"},
+		{name: "missing-file", username: "deployment-user", file: true},
+		{name: "empty-file", username: "deployment-user", create: true, file: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			isolatePDPeerConfig(t)
+			file := filepath.Join(t.TempDir(), "password")
+			if test.create {
+				if err := os.WriteFile(file, []byte(test.contents), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("VERMEER_HUGEGRAPH_USERNAME", test.username)
+			if test.file {
+				t.Setenv("VERMEER_HUGEGRAPH_PASSWORD_FILE", file)
+			}
+			username, password, err := ResolveHugegraphCredentials("task-user", "task-sensitive-password")
+			if err == nil || username != "" || password != "" {
+				t.Fatal("invalid deployment credentials must not fall back")
+			}
+			for _, secret := range []string{"synthetic-sensitive-password", "task-sensitive-password"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("errors must not expose credentials")
+				}
+			}
+		})
+	}
+}

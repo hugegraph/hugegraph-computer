@@ -19,7 +19,9 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"vermeer/apps/common"
@@ -39,9 +41,25 @@ const (
 
 var factory *TokenFactory
 
-func Init() {
-	factor := common.GetConfig("auth_token_factor").(string)
+func Init() error {
+	factor, inlineConfigured := common.GetConfig("auth_token_factor").(string)
+	file := os.Getenv("VERMEER_AUTH_TOKEN_FACTOR_FILE")
+	if file == "" {
+		file, _ = common.GetConfigDefault("auth_token_factor_file", "").(string)
+	}
+	if file != "" {
+		var err error
+		factor, err = ReadTokenFactorFile(file)
+		if err != nil {
+			factory = nil
+			return err
+		}
+	} else if !inlineConfigured {
+		factory = nil
+		return errors.New("configure a token signing factor or factor file")
+	}
 	factory = &TokenFactory{Factor: factor}
+	return nil
 }
 
 func NoneAuthFilter(ctx *gin.Context) {

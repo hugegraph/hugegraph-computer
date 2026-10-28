@@ -73,12 +73,14 @@ func TestPDPeersOverrideWarning(t *testing.T) {
 
 func isolatePDPeerConfig(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"pd_peers", "pd_password_file", "hugegraph_credentials_file"} {
+	for _, key := range []string{"pd_peers", "pd_password_file", "hugegraph_credentials_file",
+		"hugegraph_username", "hugegraph_password_file"} {
 		old := GetConfigDefault(key, "")
 		SetConfig(key, "")
 		t.Cleanup(func() { SetConfig(key, old) })
 	}
-	for _, key := range []string{"VERMEER_PD_PEERS", "VERMEER_PD_PASSWORD_FILE", "VERMEER_HUGEGRAPH_CREDENTIALS_FILE"} {
+	for _, key := range []string{"VERMEER_PD_PEERS", "VERMEER_PD_PASSWORD_FILE", "VERMEER_HUGEGRAPH_CREDENTIALS_FILE",
+		"VERMEER_HUGEGRAPH_USERNAME", "VERMEER_HUGEGRAPH_PASSWORD_FILE"} {
 		t.Setenv(key, "")
 	}
 }
@@ -103,8 +105,9 @@ func TestPDPeersDeploymentPrecedence(t *testing.T) {
 }
 
 func TestPDPeersDeploymentCredentialsRequireConfig(t *testing.T) {
-	for _, key := range []string{"pd_password_file", "hugegraph_credentials_file",
-		"VERMEER_PD_PASSWORD_FILE", "VERMEER_HUGEGRAPH_CREDENTIALS_FILE"} {
+	for _, key := range []string{"pd_password_file", "hugegraph_credentials_file", "hugegraph_username", "hugegraph_password_file",
+		"VERMEER_PD_PASSWORD_FILE", "VERMEER_HUGEGRAPH_CREDENTIALS_FILE",
+		"VERMEER_HUGEGRAPH_USERNAME", "VERMEER_HUGEGRAPH_PASSWORD_FILE"} {
 		t.Run(key, func(t *testing.T) {
 			isolatePDPeerConfig(t)
 			missing := filepath.Join(t.TempDir(), "not-created")

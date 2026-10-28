@@ -50,7 +50,9 @@ func Main() {
 	switch authType {
 	case "token":
 		sen.StaticFS("ui", asset.Assets)
-		auth.Init()
+		if err := auth.Init(); err != nil {
+			logrus.Fatalf("token authentication initialization failed: %s", err)
+		}
 		services.SetRouters(sen, auth.TokenFilter)
 		services.SetAdminRouters(sen, auth.TokenFilter, auth.AdminFilter)
 		services.SetUI(sen)
