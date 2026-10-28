@@ -30,7 +30,7 @@ func TestSecureTokenProtocolAndLegacyCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secure.Factor != "" || secure.signingKey == nil {
+	if secure.signingKey == nil {
 		t.Fatal("secure keys must be separate from legacy factor state")
 	}
 	token := &Token{User: "admin", Space: "$DEFAULT", Client: "compatibility", Time: math.MaxInt64}

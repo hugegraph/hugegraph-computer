@@ -40,8 +40,11 @@ const (
 )
 
 var factory *TokenFactory
+var secureFactory *SecureTokenFactory
 
 func Init() error {
+	factory = nil
+	secureFactory = nil
 	file := os.Getenv("VERMEER_AUTH_TOKEN_FACTOR_FILE")
 	if file == "" {
 		file, _ = common.GetConfigDefault("auth_token_factor_file", "").(string)
@@ -52,7 +55,7 @@ func Init() error {
 			factory = nil
 			return err
 		}
-		factory, err = NewSecureTokenFactory(signingKey)
+		secureFactory, err = NewSecureTokenFactory(signingKey)
 		return err
 	}
 	factor, inlineConfigured := common.GetConfig("auth_token_factor").(string)
@@ -77,6 +80,7 @@ func TokenFilter(ctx *gin.Context) {
 	var credential *structure.Credential
 	var err error
 	var text string
+	var valid bool
 	header := ctx.GetHeader(HeaderKey)
 	if header == "" {
 		if str, err := ctx.Cookie(CookieKey); err != nil {
@@ -97,7 +101,12 @@ func TokenFilter(ctx *gin.Context) {
 		goto LOGIN
 	}
 
-	if !factory.Verify(token) {
+	if secureFactory != nil {
+		valid = secureFactory.Verify(token)
+	} else if factory != nil {
+		valid = factory.Verify(token)
+	}
+	if !valid {
 		text = "Invalid Token"
 		goto LOGIN
 	}

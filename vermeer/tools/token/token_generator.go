@@ -26,6 +26,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"time"
 	"vermeer/apps/auth"
 )
 
@@ -59,7 +60,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if *user == "" {
 		return errors.New("user must not be empty")
 	}
-	var factory *auth.TokenFactory
+	tokenObj := &auth.Token{User: *user, Space: *space, Client: *client, Time: time.Now().Unix()}
+	if *immortal {
+		tokenObj.Time = math.MaxInt64
+	}
 	if *factorFile != "" {
 		factorSpecified := false
 		flags.Visit(func(f *flag.Flag) { factorSpecified = factorSpecified || f.Name == "factor" })
@@ -70,19 +74,15 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		factory, err = auth.NewSecureTokenFactory(signingKey)
+		secureFactory, err := auth.NewSecureTokenFactory(signingKey)
 		if err != nil {
 			return err
 		}
+		secureFactory.Sign(tokenObj)
 	} else {
-		factory = &auth.TokenFactory{Factor: *factor}
+		legacyFactory := &auth.TokenFactory{Factor: *factor}
+		legacyFactory.Sign(tokenObj)
 	}
-
-	tokenObj := factory.NewToken(*user, *space, *client)
-	if *immortal {
-		tokenObj.Time = math.MaxInt64
-	}
-	factory.Sign(tokenObj)
 	data, err := json.Marshal(tokenObj)
 	if err != nil {
 		return errors.New("encode token")

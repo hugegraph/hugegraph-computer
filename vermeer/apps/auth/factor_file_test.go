@@ -29,10 +29,12 @@ func TestTokenFactorFilePrecedenceAndFailClosed(t *testing.T) {
 	previousFactor := common.GetConfigDefault("auth_token_factor", "")
 	previousFile := common.GetConfigDefault("auth_token_factor_file", "")
 	previousFactory := factory
+	previousSecureFactory := secureFactory
 	t.Cleanup(func() {
 		common.SetConfig("auth_token_factor", previousFactor)
 		common.SetConfig("auth_token_factor_file", previousFile)
 		factory = previousFactory
+		secureFactory = previousSecureFactory
 	})
 	common.SetConfig("auth_token_factor", "legacy-inline-factor")
 	configured := filepath.Join(t.TempDir(), "configured")
@@ -45,11 +47,13 @@ func TestTokenFactorFilePrecedenceAndFailClosed(t *testing.T) {
 	}
 	common.SetConfig("auth_token_factor_file", configured)
 	t.Setenv("VERMEER_AUTH_TOKEN_FACTOR_FILE", override)
-	if err := Init(); err != nil || factory.Factor != "" || string(factory.signingKey) != "environment-factor" {
+	if err := Init(); err != nil || factory != nil || secureFactory == nil ||
+		string(secureFactory.signingKey) != "environment-factor" {
 		t.Fatal("environment factor file must override config and inline factor")
 	}
 	t.Setenv("VERMEER_AUTH_TOKEN_FACTOR_FILE", "")
-	if err := Init(); err != nil || factory.Factor != "" || string(factory.signingKey) != "configured-factor" {
+	if err := Init(); err != nil || factory != nil || secureFactory == nil ||
+		string(secureFactory.signingKey) != "configured-factor" {
 		t.Fatal("configured factor file must override inline factor")
 	}
 	for _, test := range []struct{ name, data string }{
@@ -66,7 +70,7 @@ func TestTokenFactorFilePrecedenceAndFailClosed(t *testing.T) {
 			}
 			t.Setenv("VERMEER_AUTH_TOKEN_FACTOR_FILE", file)
 			err := Init()
-			if err == nil || factory != nil {
+			if err == nil || factory != nil || secureFactory != nil {
 				t.Fatal("invalid file must not leave an active fallback factory")
 			}
 			if strings.Contains(err.Error(), "synthetic-secret") {
@@ -75,7 +79,7 @@ func TestTokenFactorFilePrecedenceAndFailClosed(t *testing.T) {
 		})
 	}
 	common.SetConfig("auth_token_factor_file", "")
-	if err := Init(); err != nil || factory.Factor != "legacy-inline-factor" {
+	if err := Init(); err != nil || secureFactory != nil || factory == nil || factory.Factor != "legacy-inline-factor" {
 		t.Fatal("unconfigured deployments must preserve inline factors")
 	}
 }
