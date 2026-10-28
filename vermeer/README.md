@@ -308,6 +308,31 @@ The generated token can be used in two ways:
 1. **HTTP Header**: `Authorization: Bearer <token>`
 2. **Login API**: `POST /api/v1/login` with body `{"token": "<token>"}` (sets cookie)
 
+### Native UI administrator password
+
+For a short administrator login, optionally configure Master with `VERMEER_ADMIN_PASSWORD_FILE=/path/to/admin-password`,
+or `admin_password_file` in its INI file. The environment path takes precedence. This requires `auth=token` and a valid
+file-backed v2 signing factor; legacy inline signing and `auth=none` reject the password configuration before listening.
+An unconfigured password file preserves token-only login.
+
+Provide a protected `0600` password file, preferably a separately generated random 16-character alphanumeric credential.
+Helm deployments generate and retain this credential separately from the internal signing factor and Hubble service token.
+The file must be nonempty UTF-8 on one line, without CR/LF, and cannot contain only whitespace. All other bytes are preserved,
+including leading or trailing spaces. A configured missing, unreadable or invalid file stops Master; it never disables authentication.
+
+Open `/ui/master.html` and paste this credential into **Admin password or token**. No user database or extra account is created:
+successful password login issues an `admin` session in `$DEFAULT`, signed with v2 HMAC-SHA256 and valid for 24 hours.
+Its cookie is HttpOnly and uses Secure for HTTPS, including requests forwarded with `X-Forwarded-Proto: https`.
+The existing login request field remains `token`; it accepts either the short password or a valid opaque token.
+Incorrect credentials return 401 without issuing a cookie. The short password is never accepted as an API Bearer token.
+Hubble continues to use its independently generated long-lived service token without requiring user input.
+
+Password changes take effect after restarting Master. They change subsequent UI logins without rotating the signing factor
+or Hubble token. Already issued UI sessions remain valid for their remaining 24-hour lifetime; rotate the signing factor
+and regenerate dependent tokens when immediate session revocation is required.
+With token authentication, Worker/Master metadata routes also require a valid session or Bearer token;
+health probes, login and static login assets remain public. Explicit `auth=none` retains its existing behavior.
+
 ### Worker Configuration (`worker.ini`)
 
 For a PD deployment using a shared secret, configure both Master and Worker with

@@ -18,7 +18,8 @@ under the License.
 package services
 
 import (
-	"fmt"
+	"net/http"
+	"strings"
 	"vermeer/apps/auth"
 	"vermeer/apps/common"
 
@@ -28,7 +29,7 @@ import (
 //const cookieTokenExpire = 1 * time.Minute
 
 type LoginRequest struct {
-	Token *string
+	Token *string `json:"token"`
 }
 
 type LoginHandler struct {
@@ -37,33 +38,33 @@ type LoginHandler struct {
 
 func (l *LoginHandler) POST(ctx *gin.Context) {
 	req := LoginRequest{}
-	err := ctx.BindJSON(&req)
-	if isBad(err != nil, ctx, func() string { return fmt.Sprintf("request body not correct: %s", err) }) {
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		isBad(true, ctx, func() string { return "invalid login request" })
 		return
 	}
-
-	if req.Token != nil {
-		doTokenLogin(ctx, &req)
+	if req.Token == nil {
+		isBad(true, ctx, func() string { return "admin credential is required" })
 		return
 	}
-
-	if isBad(true, ctx, func() string { return fmt.Sprintf("request body not correct: %s", err) }) {
-		return
-	}
+	doTokenLogin(ctx, &req)
 }
 
 func doTokenLogin(ctx *gin.Context, req *LoginRequest) {
-	token := auth.ToTokenBase58(*req.Token)
-	if isBad(token == nil, ctx, func() string { return "invalid token string format" }) {
+	if session, okPassword := auth.ExchangeAdminPassword(*req.Token); okPassword {
+		setTokenCookie(ctx, session, auth.AdminSessionMaxAge)
+		ok(ctx, "login success")
 		return
 	}
-
-	setTokenCookie(ctx, *req.Token)
-
+	token := auth.ToTokenBase58(*req.Token)
+	if !auth.ValidLoginToken(token) {
+		ctx.JSON(http.StatusUnauthorized, common.BaseResp{ErrCode: 1, Message: "invalid admin credential"})
+		return
+	}
+	setTokenCookie(ctx, *req.Token, 0)
 	ok(ctx, "login success")
 }
 
-func setTokenCookie(ctx *gin.Context, token string) {
-	// expires: session
-	ctx.SetCookie(auth.CookieKey, token, 0, "/", "", false, true)
+func setTokenCookie(ctx *gin.Context, token string, maxAge int) {
+	secure := ctx.Request.TLS != nil || strings.EqualFold(ctx.GetHeader("X-Forwarded-Proto"), "https")
+	ctx.SetCookie(auth.CookieKey, token, maxAge, "/", "", secure, true)
 }

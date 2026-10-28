@@ -20,7 +20,7 @@
         login: function () {
             const token = $('#admin_token').val();
             if (!token) {
-                showDelModal('empty token');
+                showDelModal('Enter an admin password or token.');
                 return;
             }
 

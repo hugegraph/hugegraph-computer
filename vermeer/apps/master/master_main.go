@@ -40,6 +40,9 @@ func Main() {
 	httpPeer := common.GetConfig("http_peer").(string)
 	debugMode := common.GetConfig("debug_mode").(string)
 	authType := common.GetConfigDefault("auth", "none").(string)
+	if err := auth.ValidateAdminPasswordMode(authType); err != nil {
+		logrus.Fatalf("token authentication initialization failed: %s", err)
+	}
 	services.InfoMaster.IpAddr = httpPeer
 	services.InfoMaster.DebugMod = debugMode
 	services.InfoMaster.Version = version.Version

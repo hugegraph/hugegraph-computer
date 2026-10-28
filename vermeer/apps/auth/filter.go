@@ -45,6 +45,8 @@ var secureFactory *SecureTokenFactory
 func Init() error {
 	factory = nil
 	secureFactory = nil
+	adminPassword = nil
+	passwordFile := adminPasswordFile()
 	file := os.Getenv("VERMEER_AUTH_TOKEN_FACTOR_FILE")
 	if file == "" {
 		file, _ = common.GetConfigDefault("auth_token_factor_file", "").(string)
@@ -55,8 +57,23 @@ func Init() error {
 			factory = nil
 			return err
 		}
-		secureFactory, err = NewSecureTokenFactory(signingKey)
-		return err
+		configuredFactory, err := NewSecureTokenFactory(signingKey)
+		if err != nil {
+			return err
+		}
+		var configuredPassword []byte
+		if passwordFile != "" {
+			configuredPassword, err = readAdminPasswordFile(passwordFile)
+			if err != nil {
+				return err
+			}
+		}
+		secureFactory = configuredFactory
+		adminPassword = configuredPassword
+		return nil
+	}
+	if passwordFile != "" {
+		return errors.New("admin password file requires file-backed v2 token authentication")
 	}
 	factor, inlineConfigured := common.GetConfig("auth_token_factor").(string)
 	if !inlineConfigured {
@@ -80,7 +97,6 @@ func TokenFilter(ctx *gin.Context) {
 	var credential *structure.Credential
 	var err error
 	var text string
-	var valid bool
 	header := ctx.GetHeader(HeaderKey)
 	if header == "" {
 		if str, err := ctx.Cookie(CookieKey); err != nil {
@@ -101,17 +117,12 @@ func TokenFilter(ctx *gin.Context) {
 		goto LOGIN
 	}
 
-	if secureFactory != nil {
-		valid = secureFactory.Verify(token)
-	} else if factory != nil {
-		valid = factory.Verify(token)
-	}
-	if !valid {
+	if !validSignature(token) {
 		text = "Invalid Token"
 		goto LOGIN
 	}
 
-	if time.Now().Unix()-token.Time > tokenMaxAge {
+	if tokenExpired(token) {
 		text = "Expired Token"
 		goto LOGIN
 	}
@@ -210,4 +221,8 @@ func DecodeBase58(str string) string {
 	res := string(b)
 	return res
 
+}
+
+func tokenExpired(token *Token) bool {
+	return time.Now().Unix()-token.Time > tokenMaxAge
 }

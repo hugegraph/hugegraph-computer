@@ -62,8 +62,9 @@ under the License.
     <div class="container-fluid text-left">
         <form class="form-inline">
             <div class="form-group mx-sm-3 mb-2">
-                <label for="inputPassword2" class="sr-only">Password</label>
-                <input type="password" class="form-control" id="admin_token" placeholder="Admin Token">
+                <label for="admin_token" class="sr-only">Admin credential</label>
+                <input type="password" class="form-control" id="admin_token" placeholder="Admin password or token"
+                    autocomplete="current-password" autocapitalize="none" spellcheck="false">
             </div>
             <button type="button" class="btn btn-primary mb-2" id="token_submit"
                 onclick="vermeer.login()">Login</button>

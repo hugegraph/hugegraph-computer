@@ -71,6 +71,12 @@ func TestNativeLoginCookieUsesSecureDeploymentToken(t *testing.T) {
 		login.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, login)
+		if want != http.StatusOK {
+			if response.Code != http.StatusUnauthorized || len(response.Result().Cookies()) != 0 {
+				t.Fatal("invalid token login must reject before issuing a cookie")
+			}
+			return
+		}
 		if response.Code != http.StatusOK {
 			t.Fatalf("native login status = %d", response.Code)
 		}
@@ -93,4 +99,32 @@ func TestNativeLoginCookieUsesSecureDeploymentToken(t *testing.T) {
 	legacy := &auth.TokenFactory{Factor: key}
 	legacy.Sign(token)
 	authenticate(token, http.StatusUnauthorized)
+}
+
+func TestNativeLegacyTokenLoginRemainsSupported(t *testing.T) {
+	for _, key := range []string{"auth_token_factor", "auth_token_factor_file", "admin_password_file"} {
+		previous := common.GetConfigDefault(key, "")
+		common.SetConfig(key, "")
+		t.Cleanup(func() { common.SetConfig(key, previous) })
+	}
+	t.Setenv("VERMEER_AUTH_TOKEN_FACTOR_FILE", "")
+	t.Setenv("VERMEER_ADMIN_PASSWORD_FILE", "")
+	const factor = "synthetic-legacy-inline-factor"
+	common.SetConfig("auth_token_factor", factor)
+	if err := auth.Init(); err != nil {
+		t.Fatal(err)
+	}
+	factory := &auth.TokenFactory{Factor: factor}
+	token := factory.NewToken("admin", "$DEFAULT", "legacy-client")
+	factory.Sign(token)
+	encoded, err := json.Marshal(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	router.POST("/api/v1/login", (&LoginHandler{}).POST)
+	response := postNativeCredential(t, router, auth.ToBase58(string(encoded)), "")
+	if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
+		t.Fatal("valid historical inline-token login must remain supported")
+	}
 }
