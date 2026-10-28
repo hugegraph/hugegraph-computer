@@ -152,3 +152,19 @@ jobs:
             echo 'Master log exposed the factor' >&2
             exit 1
           fi
+          # Exercise the same non-root identity used by the Helm test hook.
+          # Keep its synthetic factor and token inside a private writable /tmp directory.
+          docker run --rm --user 100:101 --entrypoint /bin/sh vermeer:ci-check -ec '
+            umask 077
+            token_dir=$(mktemp -d /tmp/vermeer-token.XXXXXX)
+            trap '\''rm -rf "${token_dir}"'\'' EXIT
+            printf "%s" synthetic-nonroot-test-factor > "${token_dir}/factor"
+            test -x /go/bin/app
+            /go/bin/vermeer-token -factor-file "${token_dir}/factor" \
+              -output-file "${token_dir}/token" -user admin -space '\''$DEFAULT'\'' -i -quiet \
+              > "${token_dir}/stdout" 2> "${token_dir}/stderr"
+            test -s "${token_dir}/token"
+            test "$(stat -c %a "${token_dir}/token")" = 600
+            test ! -s "${token_dir}/stdout"
+            test ! -s "${token_dir}/stderr"
+          '
