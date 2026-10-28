@@ -79,7 +79,9 @@ func Main() {
 	}
 	serverOptions := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(4 * 1024 * 1024 * 1024),
-		grpc.MaxSendMsgSize(4 * 1024 * 1024 * 1024)}
+		grpc.MaxSendMsgSize(4 * 1024 * 1024 * 1024),
+		grpc.StreamInterceptor(validateWorkerStream),
+	}
 
 	// create grpc server
 	grpcServer := grpc.NewServer(serverOptions...)
