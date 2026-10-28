@@ -277,7 +277,8 @@ go run ./cmd/vermeer-token -user admin -space '$DEFAULT' \
   -factor-file config/token-factor -output-file config/admin-token -i -quiet
 
 # Or run in Docker (no local Go required)
-docker run --rm -v "$PWD/config:/tokens" --entrypoint /go/bin/vermeer-token \
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/config:/tokens" \
+  --entrypoint /go/bin/vermeer-token \
   hugegraph/vermeer -user admin -space '$DEFAULT' \
   -factor-file /tokens/token-factor -output-file /tokens/admin-token -i -quiet
 ```
@@ -320,7 +321,7 @@ Helm deployments generate and retain this credential separately from the interna
 The file must be nonempty UTF-8 on one line, without CR/LF, and cannot contain only whitespace. All other bytes are preserved,
 including leading or trailing spaces. A configured missing, unreadable or invalid file stops Master; it never disables authentication.
 
-Open `/ui/master.html` and paste this credential into **Admin password or token**. No user database or extra account is created:
+Open `/` and paste this credential into **Admin password or token**. No user database or extra account is created:
 successful password login issues an `admin` session in `$DEFAULT`, signed with v2 HMAC-SHA256 and valid for 24 hours.
 Its cookie is HttpOnly and uses Secure for HTTPS, including requests forwarded with `X-Forwarded-Proto: https`.
 The existing login request field remains `token`; it accepts either the short password or a valid opaque token.
@@ -410,6 +411,10 @@ run_mode = worker
 # Worker group identifier
 worker_group = default
 ```
+
+For advanced connection troubleshooting, `grpc_dial_timeout` or `VERMEER_GRPC_DIAL_TIMEOUT` bounds Worker peer dialing.
+It defaults to `5s` and must be a positive Go duration such as `500ms` or `10s`. An unreachable bootstrap peer fails
+within this budget so the process supervisor or Kubernetes can retry; a healthy HTTP listener alone does not prove Worker availability.
 
 ## Available Algorithms
 
@@ -712,6 +717,18 @@ Access the Web UI dashboard at `http://master-ip:6688/` for:
 - Increase `compute_threads` in worker config
 - Check network latency between master and workers
 - Profile algorithm with built-in metrics (access via API)
+
+## Runtime image validation
+
+Validate a built image with Docker and host Python 3 (standard library only), without PD or Store:
+
+```bash
+bash scripts/test-runtime-image.sh hugegraph/vermeer:your-build
+```
+
+The check covers non-root helper execution, private v2 token files, invalid-configuration startup failures,
+short-password UI login, cookie/API authentication and embedded login assets. It binds Master only to local loopback,
+uses temporary test credentials, applies bounded timeouts and removes its containers and files on exit.
 
 ## Links
 

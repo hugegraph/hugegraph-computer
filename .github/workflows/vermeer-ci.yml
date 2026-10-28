@@ -76,9 +76,9 @@ jobs:
         run: |
           go test -race ./apps/auth ./cmd/vermeer-token
           go test -race ./apps/common
-          go test -race ./apps/master/workers ./apps/master/services -run 'Test(WorkerAvailability|Native)'
+          go test -race ./apps/master/workers ./apps/master/services
           go test -race ./apps/master/bl -run 'Test(WorkerAvailability|HugegraphLoadAuthorization)'
-          go test -race ./apps/worker -run 'Test(LoadReceivers|RecvVertex|ComputeDispatchCancellation)'
+          go test -race ./apps/worker
           go test -race ./apps/structure -run 'Test(VertexStore|GraphPropagates|MemoryVertex|HugegraphSchema)'
 
       - name: Build
@@ -118,60 +118,5 @@ jobs:
           docker run --rm --entrypoint test vermeer:ci-check -f /go/bin/release-docs/NOTICE
           docker run --rm --entrypoint test vermeer:ci-check -d /go/bin/release-docs/licenses
 
-      - name: Verify native token helper and invalid factor rejection
-        run: |
-          umask 077
-          TOKEN_CHECK_DIR=$(mktemp -d)
-          trap 'rm -rf "${TOKEN_CHECK_DIR}"' EXIT
-          openssl rand -hex 32 > "${TOKEN_CHECK_DIR}/factor"
-          docker run --rm -v "${TOKEN_CHECK_DIR}:/probe" \
-            --entrypoint /go/bin/vermeer-token vermeer:ci-check \
-            -factor-file /probe/factor -output-file /probe/token \
-            -user admin -space '$DEFAULT' -i -quiet \
-            > "${TOKEN_CHECK_DIR}/stdout" 2> "${TOKEN_CHECK_DIR}/stderr"
-          test -s "${TOKEN_CHECK_DIR}/token"
-          test "$(stat -c '%a' "${TOKEN_CHECK_DIR}/token")" = 600
-          test ! -s "${TOKEN_CHECK_DIR}/stdout"
-          test ! -s "${TOKEN_CHECK_DIR}/stderr"
-          if docker run --rm --entrypoint /go/bin/vermeer-token vermeer:ci-check \
-            -factor synthetic-legacy-factor -quiet \
-            > "${TOKEN_CHECK_DIR}/stdout" 2> "${TOKEN_CHECK_DIR}/stderr"; then
-            echo 'runtime token helper accepted a legacy inline factor' >&2
-            exit 1
-          fi
-          test ! -s "${TOKEN_CHECK_DIR}/stdout"
-          if docker run --rm -v "${TOKEN_CHECK_DIR}:/probe" \
-            --entrypoint /go/bin/vermeer-token vermeer:ci-check \
-            -factor-file /probe/missing -output-file /probe/rejected -quiet \
-            > "${TOKEN_CHECK_DIR}/stdout" 2> "${TOKEN_CHECK_DIR}/stderr"; then
-            echo 'token generation accepted a missing factor file' >&2
-            exit 1
-          fi
-          test ! -e "${TOKEN_CHECK_DIR}/rejected"
-          test ! -s "${TOKEN_CHECK_DIR}/stdout"
-          if docker run --rm -e VERMEER_AUTH_TOKEN_FACTOR_FILE=/probe/missing \
-            vermeer:ci-check -env=master -auth=token \
-            > "${TOKEN_CHECK_DIR}/master-log" 2>&1; then
-            echo 'Master accepted a missing factor file' >&2
-            exit 1
-          fi
-          if grep -qF -f "${TOKEN_CHECK_DIR}/factor" "${TOKEN_CHECK_DIR}/master-log"; then
-            echo 'Master log exposed the factor' >&2
-            exit 1
-          fi
-          # Exercise the same non-root identity used by the Helm test hook.
-          # Keep its synthetic factor and token inside a private writable /tmp directory.
-          docker run --rm --user 100:101 --entrypoint /bin/sh vermeer:ci-check -ec '
-            umask 077
-            token_dir=$(mktemp -d /tmp/vermeer-token.XXXXXX)
-            trap '\''rm -rf "${token_dir}"'\'' EXIT
-            printf "%s" synthetic-nonroot-test-factor > "${token_dir}/factor"
-            test -x /go/bin/app
-            /go/bin/vermeer-token -factor-file "${token_dir}/factor" \
-              -output-file "${token_dir}/token" -user admin -space '\''$DEFAULT'\'' -i -quiet \
-              > "${token_dir}/stdout" 2> "${token_dir}/stderr"
-            test -s "${token_dir}/token"
-            test "$(stat -c %a "${token_dir}/token")" = 600
-            test ! -s "${token_dir}/stdout"
-            test ! -s "${token_dir}/stderr"
-          '
+      - name: Verify runtime credentials and native UI login
+        run: bash scripts/test-runtime-image.sh vermeer:ci-check
