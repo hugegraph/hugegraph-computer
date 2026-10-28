@@ -505,8 +505,7 @@ curl -X POST http://localhost:6688/api/v1/tasks/create \
     "params": {
       "load.type": "hugegraph",
       "load.hg_pd_peers": "[\"127.0.0.1:8686\"]",
-      "load.hugegraph_name": "DEFAULT/hugegraph/g",
-      "load.parallel": "4"
+      "load.hugegraph_name": "DEFAULT/hugegraph/g"
     }
   }'
 
@@ -560,6 +559,7 @@ In the task request above, `load.hg_pd_peers` is a JSON array encoded as a strin
 and `load.hugegraph_name` uses `<graphspace>/<graph>/g`. Pass these keys inside the
 flat `params` map with `task_type: "load"`, not a nested `hugegraph` object.
 The Server/Store metadata prefix and credentials must follow the deployment guide.
+The current HugeGraph loader does not subdivide each Store partition using `load.parallel`; omit that option here.
 
 ### Local CSV Files
 
@@ -703,7 +703,7 @@ vermeer/tools/protoc/linux64/protoc vermeer/apps/protos/*.proto --go-grpc_out=ve
 
 ### Algorithm-Specific
 
-- **PageRank**: Use `damping_factor=0.85`, `tolerance=0.0001` for faster convergence
+- **PageRank**: Use `pagerank.damping=0.85`; tune `pagerank.diff_threshold` (for example, `0.0001`) to control convergence.
 - **Louvain**: Enable `weighted=true` only if edge weights are meaningful
 - **SSSP**: Provide source vertex ID for single-source queries
 
