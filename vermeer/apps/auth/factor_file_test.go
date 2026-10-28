@@ -9,10 +9,10 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations
+under the License.
 */
 
 package auth
@@ -58,8 +58,10 @@ func TestTokenFactorFilePrecedenceAndFailClosed(t *testing.T) {
 	}
 	for _, test := range []struct{ name, data string }{
 		{"missing", ""}, {"empty", ""}, {"invalid", "synthetic-secret\nsecond-line"},
-		{"short-ascii", "abc"}, {"short-unicode", "密碼"}, {"invalid-utf8", "abcd\xff"},
-		{"whitespace-only", "    "},
+		{"short-ascii", strings.Repeat("a", minTokenSigningKeyCharacters-1)},
+		{"short-unicode", strings.Repeat("密", minTokenSigningKeyCharacters-1)},
+		{"invalid-utf8", strings.Repeat("a", minTokenSigningKeyCharacters) + "\xff"},
+		{"whitespace-only", strings.Repeat(" ", minTokenSigningKeyCharacters)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "factor")
@@ -81,5 +83,20 @@ func TestTokenFactorFilePrecedenceAndFailClosed(t *testing.T) {
 	common.SetConfig("auth_token_factor_file", "")
 	if err := Init(); err != nil || secureFactory != nil || factory == nil || factory.Factor != "legacy-inline-factor" {
 		t.Fatal("unconfigured deployments must preserve inline factors")
+	}
+}
+
+func TestTokenFactorFileAcceptsMinimumLength(t *testing.T) {
+	factor := strings.Repeat("x", minTokenSigningKeyCharacters)
+	file := filepath.Join(t.TempDir(), "factor")
+	if err := os.WriteFile(file, []byte(factor+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := ReadTokenFactorFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual != factor {
+		t.Fatalf("unexpected factor after reading file: %q", actual)
 	}
 }
