@@ -709,6 +709,40 @@ vermeer/tools/protoc/linux64/protoc vermeer/apps/protos/*.proto --go-grpc_out=ve
 
 ## Monitoring
 
+### Cluster health snapshot
+
+`GET /api/v1/admin/cluster` returns a read-only, versioned snapshot for Hubble's
+operations overview. In token-authenticated deployments it requires an admin
+token; it uses the same authentication filters as the other `/admin` APIs.
+
+The response includes `schema_version: 1`, `observed_at` (Unix milliseconds),
+Master and Worker details, `registered_workers`, and `ready_workers`.
+Registration alone is not readiness: each Worker needs a ready reverse gRPC
+connection and live load, compute, and superstep streams. No Workers, or a
+registered Worker missing a readiness check, yields `DEGRADED` with a reason.
+Removed Workers are not fabricated as offline nodes, and the registered count
+is not a Kubernetes desired replica count.
+
+Each node reports resource collection separately in `metric_status`.
+`metrics.cpu_cores` is consumed process CPU seconds per elapsed wall second;
+`metrics.rss_bytes` is resident process memory, not host or Pod utilization.
+The first sample can report `metrics_warming_up`; subsequent observations
+include `sample_window_seconds`. Resource collection failure never changes
+Worker readiness, and unsupported older Workers return an explicit unsupported
+metric status. Resource RPCs share a bounded deadline and run outside the Worker
+manager lock.
+
+`GET /api/v1/workers/availability` implements the accompanying Helm availability
+hook's space-scoped check. It returns only `{"available": true|false}` for the
+authenticated credential's space, following the existing allocation
+rules: an accessible common, space, or graph Worker group must contain at least
+one Worker and every registered member must pass all readiness checks. A Worker
+registered in another group's scope does not make this check succeed. This
+endpoint describes space task availability, rather than overall cluster health.
+
+Build and deploy matching Vermeer and Hubble images together to use the new
+cluster-health contract.
+
 Access the Web UI dashboard at `http://master-ip:6688/` for:
 
 > **Note**: The Web UI requires `auth=token` in `master.ini` (or `-auth token` via command line). Without token authentication, the UI routes are not registered.

@@ -249,7 +249,7 @@ func (ph *PeerHandler) GetWorkerStatInfo(ctx context.Context, req *pb.WorkerStat
 	_ = ctx
 	_ = req
 
-	resp := new(pb.WorkerStatInfoResp)
+	resp := &pb.WorkerStatInfoResp{Base: &pb.BaseResponse{}, MetricSchemaVersion: 1}
 	mp, err := common.MachineMemUsedPercent()
 	if err != nil {
 		resp.Base.ErrorCode = -1
@@ -264,8 +264,17 @@ func (ph *PeerHandler) GetWorkerStatInfo(ctx context.Context, req *pb.WorkerStat
 	}
 	resp.MemProcessUsedPercent = pp
 
-	//logrus.Infof("GetWorkerStatInfo mem:%v", common.PrintMemUsage())
-	//logrus.Infof("GetWorkerStatInfo res:%v", resp)
+	metrics, metricErr := common.ReadProcessMetrics()
+	resp.MetricsObservedAt = metrics.ObservedAt
+	if metricErr != nil {
+		// Resource collection is independent of Worker readiness and legacy
+		// memory statistics; a failed sample must not become a service error.
+		resp.MetricError = metricErr.Error()
+	} else {
+		resp.ProcessCpuCores = metrics.CPUCores
+		resp.ProcessRssBytes = metrics.RSSBytes
+		resp.SampleWindowSeconds = metrics.SampleWindowSeconds
+	}
 
 	return resp, nil
 

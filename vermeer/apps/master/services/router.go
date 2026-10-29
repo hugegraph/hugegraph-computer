@@ -77,6 +77,7 @@ func SetRouters(sen *common.Sentinel, authFilters ...gin.HandlerFunc) {
 func SetAdminRouters(sen *common.Sentinel, authFilters ...gin.HandlerFunc) {
 	// /admin
 	regVerAPI(sen, 1, "/admin", map[string]common.BaseHandler{
+		"/cluster":                                 &AdminClusterHandler{},
 		"/graphs/:space_name":                      &AdminGraphsHandler{},
 		"/graphs/:space_name/create":               &AdminGraphCreateHandler{},
 		"/graphs/:space_name/:graph_name":          &AdminGraphHandler{},
