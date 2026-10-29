@@ -51,6 +51,9 @@ func IsFileOrDirExist(dir string) bool {
 
 func MachineMemUsedPercent() (float64, error) {
 	v, err := mem.VirtualMemory()
+	if err != nil {
+		return 0, err
+	}
 	return v.UsedPercent, err
 }
 

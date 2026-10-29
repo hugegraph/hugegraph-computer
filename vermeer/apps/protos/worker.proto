@@ -197,6 +197,14 @@ message WorkerStatInfoResp{
   common.BaseResponse Base = 1;
   double MemMachineUsedPercent = 2;
   double MemProcessUsedPercent = 3;
+  // Process resource snapshots. CPU is consumed CPU seconds / elapsed seconds,
+  // measured in cores, and RSS is absolute resident bytes, not host/Pod ratios.
+  uint32 metric_schema_version = 4;
+  double process_cpu_cores = 5;
+  uint64 process_rss_bytes = 6;
+  double sample_window_seconds = 7;
+  int64 metrics_observed_at = 8;
+  string metric_error = 9;
 }
 
 enum SettingAction

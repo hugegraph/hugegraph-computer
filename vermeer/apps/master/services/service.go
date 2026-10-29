@@ -18,8 +18,10 @@ under the License.
 package services
 
 import (
+	"sync"
 	"time"
 	"vermeer/algorithms"
+	"vermeer/apps/common"
 	"vermeer/apps/compute"
 	"vermeer/apps/graphio"
 	"vermeer/apps/master/access"
@@ -49,11 +51,27 @@ var ServiceMaster = &service{}
 var InfoMaster = &Info{}
 
 type Info struct {
+	mu         sync.RWMutex
 	GrpcPeer   string    `json:"grpc_peer,omitempty"`
 	IpAddr     string    `json:"ip_addr,omitempty"`
 	DebugMod   string    `json:"debug_mod,omitempty"`
 	Version    string    `json:"version,omitempty"`
 	LaunchTime time.Time `json:"launch_time,omitempty"`
+}
+
+type MasterInfoSnapshot struct {
+	GrpcPeer   string    `json:"grpc_peer,omitempty"`
+	IpAddr     string    `json:"ip_addr,omitempty"`
+	DebugMod   string    `json:"debug_mod,omitempty"`
+	Version    string    `json:"version,omitempty"`
+	LaunchTime time.Time `json:"launch_time,omitempty"`
+}
+
+func (info *Info) snapshot() MasterInfoSnapshot {
+	info.mu.RLock()
+	defer info.mu.RUnlock()
+	return MasterInfoSnapshot{GrpcPeer: info.GrpcPeer, IpAddr: info.IpAddr,
+		DebugMod: info.DebugMod, Version: info.Version, LaunchTime: info.LaunchTime}
 }
 
 type service struct {
@@ -155,6 +173,9 @@ func (s *service) Init() error {
 }
 
 func (s *service) Run() {
+	_, _ = common.ReadProcessMetrics()
+	InfoMaster.mu.Lock()
+	defer InfoMaster.mu.Unlock()
 	InfoMaster.LaunchTime = time.Now()
 }
 

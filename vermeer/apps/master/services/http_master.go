@@ -30,6 +30,6 @@ type InfoMasterHandler struct {
 
 func (mh *InfoMasterHandler) GET(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{
-		"master": InfoMaster,
+		"master": InfoMaster.snapshot(),
 	})
 }
