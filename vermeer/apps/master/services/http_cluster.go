@@ -77,37 +77,64 @@ func collectClusterSnapshot(parent context.Context) ClusterSnapshot {
 	now := time.Now().UnixMilli()
 	snapshots := WorkerMgr.HealthSnapshots()
 	info := InfoMaster.snapshot()
+	return buildClusterSnapshot(parent, info, snapshots, now)
+}
+
+func buildClusterSnapshot(parent context.Context, info MasterInfoSnapshot,
+	snapshots []workers.WorkerHealthSnapshot, now int64) ClusterSnapshot {
 	result := ClusterSnapshot{
 		SchemaVersion: 1, ObservedAt: now, Status: "UP",
 		RegisteredWorkers: len(snapshots),
 		Master:            clusterMasterNode(info, now),
 		Workers:           make([]ClusterNode, len(snapshots)),
 	}
+	for index, snapshot := range snapshots {
+		result.Workers[index] = clusterWorkerMetadata(snapshot, now)
+	}
 	// One total deadline and bounded fanout prevent telemetry from delaying health
 	// indefinitely. Worker metadata is already copied, so no lock spans an RPC.
 	ctx, cancel := context.WithTimeout(parent, 800*time.Millisecond)
 	defer cancel()
 	var wg sync.WaitGroup
-	jobs := make(chan int)
 	count := len(snapshots)
 	if count > 8 {
 		count = 8
 	}
+	jobs := make(chan int, count)
 	for i := 0; i < count; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for index := range jobs {
-				result.Workers[index] = clusterWorkerNode(ctx, snapshots[index], now)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case index, ok := <-jobs:
+					if !ok || ctx.Err() != nil {
+						return
+					}
+					result.Workers[index] = collectWorkerMetrics(ctx, snapshots[index], result.Workers[index], now)
+				}
 			}
 		}()
 	}
+enqueue:
 	for index := range snapshots {
-		jobs <- index
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break enqueue
+		case jobs <- index:
+		}
 	}
 	close(jobs)
 	wg.Wait()
-	for _, worker := range result.Workers {
+	for index, worker := range result.Workers {
+		if ctx.Err() != nil && worker.MetricStatus.Reason == "metrics_not_collected" {
+			result.Workers[index].MetricStatus.Reason = "metrics_timeout"
+		}
 		if worker.Ready {
 			result.ReadyWorkers++
 		}
@@ -151,6 +178,10 @@ func clusterMasterNode(info MasterInfoSnapshot, now int64) ClusterNode {
 }
 
 func clusterWorkerNode(ctx context.Context, snapshot workers.WorkerHealthSnapshot, now int64) ClusterNode {
+	return collectWorkerMetrics(ctx, snapshot, clusterWorkerMetadata(snapshot, now), now)
+}
+
+func clusterWorkerMetadata(snapshot workers.WorkerHealthSnapshot, now int64) ClusterNode {
 	checks := snapshot.Checks
 	node := ClusterNode{ID: snapshot.Name, Name: snapshot.Name, Role: "WORKER",
 		Group: snapshot.Group, GrpcPeer: snapshot.GrpcPeer, Version: snapshot.Version,
@@ -165,7 +196,18 @@ func clusterWorkerNode(ctx context.Context, snapshot workers.WorkerHealthSnapsho
 	if !node.Ready {
 		node.Status = "DEGRADED"
 	}
-	if !checks.ConnectionReady || snapshot.Session == nil {
+	if checks.ConnectionReady && snapshot.Session != nil {
+		node.MetricStatus.Reason = "metrics_not_collected"
+	}
+	return node
+}
+
+func collectWorkerMetrics(ctx context.Context, snapshot workers.WorkerHealthSnapshot, node ClusterNode, now int64) ClusterNode {
+	if !snapshot.Checks.ConnectionReady || snapshot.Session == nil {
+		return node
+	}
+	if ctx.Err() != nil {
+		node.MetricStatus = ClusterMetricStatus{"UNAVAILABLE", now, "metrics_timeout"}
 		return node
 	}
 	response, err := snapshot.Session.GetWorkerStatInfo(ctx, &pb.WorkerStatInfoReq{})
