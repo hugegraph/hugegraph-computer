@@ -1,0 +1,24 @@
+name: Export Vermeer source
+
+on:
+  push:
+    branches:
+      - audit/vermeer-source-snapshot-20261105
+    paths:
+      - .github/workflows/export-vermeer-source.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package source
+        run: tar -czf vermeer-source.tar.gz vermeer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vermeer-source
+          path: vermeer-source.tar.gz
+          retention-days: 1
